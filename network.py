@@ -169,6 +169,7 @@ class TopLevelSimulator:
         '''
         Given details of a transaction, find out how many theoretical hops it will take
         '''
+        debug_print(f"Calculate hops")
         #If there is no directory entry
         if directory_entry == None:
             #Path will be
