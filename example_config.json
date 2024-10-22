@@ -1,0 +1,10 @@
+{
+    "Num hosts" : 16,
+    "Host line size" : 64,
+    "Host num lines" :1024 ,
+    "Host assoc" : 4,
+    "Device line size" : 64,
+    "Device num lines" : 4096,
+    "Device assoc" : 16,
+    "Num switches" : 9
+}
