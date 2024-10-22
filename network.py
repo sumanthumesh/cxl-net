@@ -1,7 +1,7 @@
 import networkx as nx
 import matplotlib.pyplot as plt
 from cache.cachesim import BaseCache,CacheLine,DirectoryEntry,DirectoryState,HostCache,SnoopFilter,OpType,debug_print,Config
-from typing import List, Dict
+from typing import List, Dict, Set
 import sys
 import json
 from cache import cachesim
@@ -147,6 +147,9 @@ class TopLevelSimulator:
         
         with open("nodes.json","w") as file:
             json.dump(self.node_id_vs_label,file,indent=4)
+            
+        #Track per cacheline directory location
+        self.per_line_switch: Dict[int, List[Set[str]]] = dict()
 
 
     def node_id_to_label(self,nodeid:int)->str:
@@ -172,6 +175,77 @@ class TopLevelSimulator:
         debug_print(f"Allocated space for line on {switch_label}")
         return self.label_to_node_id(switch_label)
 
+    def get_closest_sharers(self,h1:str,sharers:List[str]):
+        '''
+        Given a host and a list of sharers, find the set of sharers that are closest
+        '''
+        shortest_path_length = min([nx.shortest_path_length(self.network.G,source=h1,target=s) for s in sharers])
+        
+        closest_sharers: List[str] = []
+        for s in sharers:
+            if nx.shortest_path_length(self.network.G,source=h1,target=s) == shortest_path_length:
+                closest_sharers.append(s)
+        return closest_sharers
+
+    def switch_location(self,addr:int,host1:int,host2:int):
+        '''
+        For communicating writes, this function finds a switch location that is between the two host nodes
+        The aim is to see if the ideal directory location is stable or not
+        '''
+        #Get their node labels
+        h1 = self.node_id_to_label(host1)
+        h2 = self.node_id_to_label(host2)
+        
+        #Find the shortest paths between the two
+        #We want all nodes that lie on the shortest paths
+        #As long as the entry is on one of these switches, we will have latency reduction
+        
+        all_shortest_paths = nx.all_shortest_paths(self.network.G,source=h1,target=h2)
+        union_set: Set[str] = set()
+        for path in all_shortest_paths:
+            union_set = union_set.union(set(path))
+        #Remove the host endpoints here, the set should only have switches
+        union_set = union_set.difference(self.network.host_ids)
+        
+        #Save this information
+        if addr not in self.per_line_switch.keys():
+            self.per_line_switch.update({addr:[union_set]})
+        else:
+            self.per_line_switch[addr].append(union_set)
+        
+    def switch_location_multiple_sharers(self,addr:int,host1:int,sharer_list:List[int]):
+        '''
+        Same as switch_location, but for when there are multiple sharers
+        '''
+        h1 = self.node_id_to_label(host1)
+        sharers = [self.node_id_to_label(s) for s in sharer_list]
+        closest_sharers = self.get_closest_sharers(h1,sharers)
+        union_set = set()
+        for s in closest_sharers:
+            all_shortest_paths = nx.all_shortest_paths(self.network.G,source=h1,target=s)
+            for path in all_shortest_paths:
+                union_set = union_set.union(set(path))
+        
+        #Remove endpoints
+        union_set = union_set.difference(self.network.host_ids)
+        
+        #Save this information
+        if addr not in self.per_line_switch.keys():
+            self.per_line_switch.update({addr:[union_set]})
+        else:
+            self.per_line_switch[addr].append(union_set)            
+    
+    def print_swtich_loc(self):
+        '''
+        Print the ideal switch locations
+        '''
+        with open("switch_loc.json","w") as file:
+            for key,val in self.per_line_switch.items():
+                file.write(f"{hex(key)}\n")
+                for v in val:
+                    file.write(f"{','.join(v)}\n")
+                
+        
     def calculate_hops(self,directory_entry: DirectoryEntryExtended, optype: OpType, requestor_id: int, switch_id: int = None):
         '''
         Given details of a transaction, find out how many theoretical hops it will take
@@ -249,6 +323,8 @@ class TopLevelSimulator:
                     #If the requestor already as copy and is owner, there are no coherence messages generated
                     pass
                 else:
+                    #Note which switches would be ideal to store directory entry
+                    self.switch_location(addr,requestor,dentry.owner)
                     #Handle based on read or write
                     if optype == OpType.READ:
                         #Make owner a sharer
@@ -261,8 +337,8 @@ class TopLevelSimulator:
                         self.snpf.set_state(addr,DirectoryState.S)
                         #Add the line to new sharers cache
                         self.hosts[requestor].allocate(addr)
-                        #Network section
-                        self.calculate_hops(dentry,optype,requestor,None)
+                        # #Network section
+                        # self.calculate_hops(dentry,optype,requestor,None)
                     elif optype == OpType.WRITE:
                         #Evict line from the current owners cache
                         self.hosts[dentry.owner].evict(addr)
@@ -281,6 +357,7 @@ class TopLevelSimulator:
                         #Sharer can do read without any change
                         pass
                     else:
+                        self.switch_location_multiple_sharers(addr,requestor,self.snpf.get_sharers(addr))
                         #Add requestor as sharer
                         self.snpf.add_sharer(addr,requestor)
                         #Add copy of line to new sharers cache
@@ -288,6 +365,7 @@ class TopLevelSimulator:
                         #Network section
                         self.calculate_hops(dentry,optype,requestor,None)
                 elif optype == OpType.WRITE:
+                    self.switch_location_multiple_sharers(addr,requestor,self.snpf.get_sharers(addr))
                     #Invalidate the line form cache of all hosts
                     for hostid in self.snpf.get_sharers(addr):
                         self.hosts[hostid].evict(addr)
@@ -481,3 +559,4 @@ if __name__ == '__main__':
             #Now send request to coherence engine
             sim.process_req(addr,optype,hostid)
     
+    sim.print_swtich_loc()
