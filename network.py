@@ -135,12 +135,18 @@ class TopLevelSimulator:
         self.node_id_vs_label: Dict[int, str] = dict()
         for h in hosts:
             self.node_id_vs_label[h.id] = f"H{h.id}"
-        self.node_id_vs_label[snpf.id] = f"D{snpf.id}"
+        print(self.node_id_vs_label)
+        self.node_id_vs_label[snpf.id] = f"D0"
+        print(self.node_id_vs_label)
         for i in range(network.num_switches):
-            self.node_id_vs_label[network.num_hosts + i] = f"S{i}"
+            self.node_id_vs_label[network.num_hosts + 1 + i] = f"S{i}"
+        print(self.node_id_vs_label)
 
         #Inverse list
         self.label_vs_node_id = {val:key for key,val in self.node_id_vs_label.items()}
+        
+        with open("nodes.json","w") as file:
+            json.dump(self.node_id_vs_label,file,indent=4)
 
 
     def node_id_to_label(self,nodeid:int)->str:
@@ -163,6 +169,7 @@ class TopLevelSimulator:
         path_device_to_switch = nx.shortest_path(self.network.G,source=f"D0",target=self.node_id_to_label(requestor_id))
         switch_label = path_device_to_switch[-2]
         assert switch_label[0] == 'S','Invalid node for switch allocation'
+        debug_print(f"Allocated space for line on {switch_label}")
         return self.label_to_node_id(switch_label)
 
     def calculate_hops(self,directory_entry: DirectoryEntryExtended, optype: OpType, requestor_id: int, switch_id: int = None):
@@ -191,7 +198,7 @@ class TopLevelSimulator:
             elif directory_entry.state == DirectoryState.S and optype == OpType.READ:
                 #Path will be
                 #Req -> Dir Location -> Closest Sharer -> Dir Location -> Req
-                path_to_closest_sharer = min([nx.shortest_path_length(self.G,source=self.node_id_to_label(directory_entry.dir_location),target=self.node_id_to_label(sharer)) for sharer in directory_entry.sharers])
+                path_to_closest_sharer = min([nx.shortest_path_length(self.network.G,source=self.node_id_to_label(directory_entry.dir_location),target=self.node_id_to_label(sharer)) for sharer in directory_entry.sharers])
                 debug_print(f"{optype} when shared, dir on {self.node_id_to_label(directory_entry.dir_location)}")
                 return 2 * (self.network.cost(self.node_id_to_label(requestor_id),self.node_id_to_label(directory_entry.dir_location)) +\
                             path_to_closest_sharer)
@@ -228,7 +235,7 @@ class TopLevelSimulator:
             
         #Check if there is a directory entry for this address
         if self.snpf.check_hit(addr):
-            debug_print(f"{hex(addr)} is a hit in device {self.snpf.split_addr(addr)}")
+            debug_print(f"{hex(addr)} is a hit located on {self.node_id_to_label(snpf.get_line(addr).dir_location)} {self.snpf.split_addr(addr)}")
             
             #Update the LRU (since it is a hit)
             self.snpf.add_to_lru(addr)
@@ -298,9 +305,10 @@ class TopLevelSimulator:
                 print(f"Unexpected state {dentry.state}")
             self.snpf.update_addr(addr)
         else:
-            #Line is in invalid state and no copy exists on any host
-            #CHeck if there is any space on the snoop filter to hold data
             tag, setid, blk = self.snpf.split_addr(addr)
+            #Line is in invalid state and no copy exists on any host
+            debug_print(f"{hex(addr)} is a miss")
+            #CHeck if there is any space on the snoop filter to hold data
             
             #Alias for requesting host
             h:HostCache = self.hosts[requestor]
@@ -320,6 +328,8 @@ class TopLevelSimulator:
                     d.owner = requestor
                 d.dir_location = allocated_switch
                 self.snpf.set_line(addr,d)
+                #Network section
+                self.calculate_hops(d,optype,requestor,allocated_switch)
                 #Now allocate line for this on host who will become sharer
                 #We might need to evict line on hosts because of this
                 #Allocate on this host
@@ -337,6 +347,8 @@ class TopLevelSimulator:
                 d.dir_location = allocated_switch
                 #We need to evict an entry in the snoop filter
                 self.snpf.allocate(addr,d)
+                #Network section
+                self.calculate_hops(d,optype,requestor,allocated_switch)
                 # #Set the line in directory
                 # self.snpf.set_line(addr,d)
                 #Add the copy on the host
