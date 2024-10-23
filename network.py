@@ -1,13 +1,13 @@
 import networkx as nx
 import matplotlib.pyplot as plt
-from cache.cachesim import BaseCache,CacheLine,DirectoryEntry,DirectoryState,HostCache,SnoopFilter,OpType,debug_print,Config
+from cache.cachesim import BaseCache,CacheLine,DirectoryEntry,DirectoryState,HostCache,SnoopFilter,OpType,debug_print,Config,Switch
 from typing import List, Dict, Set
 import sys
 import json
 from cache import cachesim
 
 ADDR_WIDTH = 64
-cachesim.DEBUG = True
+cachesim.DEBUG = False
 
 class DirectoryEntryExtended(DirectoryEntry):
 
@@ -207,6 +207,8 @@ class TopLevelSimulator:
         #Remove the host endpoints here, the set should only have switches
         union_set = union_set.difference(self.network.host_ids)
         
+        assert len(union_set)!=0, f"Empty union set for req {self.reqid} {hex(addr)}"
+        
         #Save this information
         if addr not in self.per_line_switch.keys():
             self.per_line_switch.update({addr:[union_set]})
@@ -219,6 +221,8 @@ class TopLevelSimulator:
         '''
         h1 = self.node_id_to_label(host1)
         sharers = [self.node_id_to_label(s) for s in sharer_list]
+        if h1 in sharers:
+            sharers.remove(h1)
         closest_sharers = self.get_closest_sharers(h1,sharers)
         union_set = set()
         for s in closest_sharers:
@@ -228,6 +232,8 @@ class TopLevelSimulator:
         
         #Remove endpoints
         union_set = union_set.difference(self.network.host_ids)
+        
+        assert len(union_set)!=0, f"Empty union set for req {self.reqid} {hex(addr)}"
         
         #Save this information
         if addr not in self.per_line_switch.keys():
@@ -295,9 +301,13 @@ class TopLevelSimulator:
         self.snpf.req_id = self.reqid
         debug_print(f"{self.reqid},{hex(addr)},{optype},{requestor}")
         self.reqid += 1
+        if self.reqid % 100000 == 0:
+            print(self.reqid)
         ##############################################
         #This will helpful for using the GUI debugger
-        if self.reqid == 640:
+        if self.reqid == 1986:
+            pass
+        if addr == 0x7ffc73cafa08:
             pass
         ##############################################
         
@@ -365,7 +375,9 @@ class TopLevelSimulator:
                         #Network section
                         self.calculate_hops(dentry,optype,requestor,None)
                 elif optype == OpType.WRITE:
-                    self.switch_location_multiple_sharers(addr,requestor,self.snpf.get_sharers(addr))
+                    #We only need to find ideal switch if the host requesting write permission is not the sole shared permission holder
+                    if not (len(dentry.sharers)==1 and dentry.sharers[0]==requestor):
+                        self.switch_location_multiple_sharers(addr,requestor,self.snpf.get_sharers(addr))
                     #Invalidate the line form cache of all hosts
                     for hostid in self.snpf.get_sharers(addr):
                         self.hosts[hostid].evict(addr)
@@ -499,6 +511,7 @@ class Config:
         self.device_num_lines = d["Device num lines"]
         self.device_assoc = d["Device assoc"]
         self.num_switches = d["Num switches"]
+        self.switch_num_lines = 0
 
 
 if __name__ == '__main__':
@@ -529,7 +542,9 @@ if __name__ == '__main__':
     
     hosts = [CXLHost(cfg.host_line_size,cfg.host_num_lines,cfg.host_assoc,i) for i in range(cfg.num_hosts)]
     snpf = CXLDevice(cfg.device_line_size,cfg.device_num_lines,cfg.device_assoc,cfg.num_hosts)
-
+    #Dummy switch for now, need to remove it for later
+    switch = Switch(64,0,16)
+    snpf.set_switch(switch)
     #Provide each host with a reference to the snoop filter
     for host in hosts:
         host.set_dir(snpf)
