@@ -4,7 +4,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from cache.cachesim import DirectoryEntry, HostCache, SnoopFilter, BaseCache, debug_print, OpType, DirectoryState
 from cache import cachesim
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Tuple
 import json
 
 cachesim.DEBUG = True
@@ -31,6 +31,9 @@ class CXLNet:
         self.G = nx.Graph()
         #Add nodes
         self.G.add_nodes_from(self.nodeids)
+        
+        self.intermediate = None
+        self.intermediate_path = []
 
 
     def connect(self,nodeA:str,nodeB:str):
@@ -85,6 +88,44 @@ class CXLNet:
             exit(1)
         return path_length
 
+    def set_intermediate(self,nodeid:int,path:List[int]):
+        '''
+        Set an intermediate node. Any message from host to device will have to travel through here
+        The path from intermediate to device is already known and fixed
+        '''
+        assert nodeid in self.switch_ids, f"Unknown node {nodeid}"
+        self.intermediate = nodeid
+        self.intermediate_path = path
+
+    def host2dir_path(self,host:int,dir:int):
+        '''
+        Calculate path between host and dir location
+        '''
+        return 2*(self.cost(host,self.intermediate) + self.cost(self.intermediate,dir))
+    
+    def path_cost(self,*args: Tuple[int]):
+        '''
+        Given a set of nodes, this will give the path cost travelling along these nodes
+        '''
+        cost = 0
+        nodes = args
+        for window in zip(nodes,nodes[1:]):
+            cost += nx.shortest_path_length(self.G,source=window[0],target=window[1])
+        debug_print(f"Path: {nodes}, Cost: {cost}")
+        return cost            
+            
+    def closest_node(self,source:int,dest:List[int]):
+        '''
+        Given one node and a list of nodes, find the node closest
+        '''
+        return min(dest, key=lambda node: nx.shortest_path_length(self.G, source, node))
+    
+    def furthest_node(self,source:int,dest:List[int]):
+        '''
+        Given one node and a list of nodes, find the node furthest away
+        '''
+        return max(dest, key=lambda node: nx.shortest_path_length(self.G, source, node))
+        
 class DirectoryEntryExtended(DirectoryEntry):
 
     def __init__(self):
@@ -239,12 +280,16 @@ class CXLDevice(SnoopFilter):
             return None
                 
     
-    def placement_policy(self,addr:int,optype:OpType,requestor:int):
+    def placement_policy(self,addr:int,optype:OpType,requestor:int,intermediate_path:List[int],reqid:int):
         '''
         Function implements the placement policy. It returns the node id where we need to allocate the entry for a new line that was previously in the invalid state
         '''
-        #For now always place on the device
-        return self.id
+        #Randomly place on device or switches
+        possible_dir_locations = intermediate_path + [self.id]
+        #Choose based on modulus
+        return possible_dir_locations[reqid % len(possible_dir_locations)]
+        # #For now always place on the device
+        # return self.id
 
 class CoherenceEngine:
     
@@ -252,6 +297,8 @@ class CoherenceEngine:
         self.hosts = hosts
         self.device = device
         self.switches = switches
+        
+        self.net: CXLNet = None
         
         self.reqid = 0
         
@@ -265,18 +312,33 @@ class CoherenceEngine:
         for switch in self.switches.values():
             print(f"{switch.id}: Switch")
         
-    def handle_host_eviction(self,addr:int,dentry:DirectoryEntry):
+    def add_network(self,net: nx.Graph):
+        '''
+        Assign topology info
+        '''
+        self.net=net
+
+    def handle_host_eviction(self,addr:int,dentry:DirectoryEntry,evicting_host:int):
         '''
         When a host chooses to evict an entry, need to update device about it
         '''
         if addr == None:
             return
         
+        i = self.net.intermediate
+        
         #Remove from owner
         if dentry.owner != None:
+            #Calculate path
+            #owner -> device -> owner
+            self.net.path_cost(dentry.owner,i,device,i,dentry.owner)
             self.hosts[dentry.owner].evict(addr)
             
         if len(dentry.sharers) != 0:
+            #Calculate path
+            #Evicting host -> device -> furthest sharer -> device
+            furthest_sharer = self.net.furthest_node(device,dentry.sharers)
+            self.net.path_cost(evicting_host,i,self.device.id,furthest_sharer,i,self.device.id)
             for hostid in dentry.sharers:
                 self.hosts[hostid].evict(addr)
                 
@@ -288,10 +350,19 @@ class CoherenceEngine:
         if addr == None:
             return
         
+        i = self.net.intermediate
+        
         if dentry.state == DirectoryState.A:
+            #Calculate path
+            #device -> owner -> device
+            self.net.path_cost(self.device.id,i,dentry.owner,i,self.device.id)
             #Evict from owner
             self.hosts[dentry.owner].evict(addr)
         elif dentry.state == DirectoryState.S:
+            #Calculate path
+            #device -> furthest sharer -> device
+            furthest_sharer = self.net.furthest_node(device,dentry.sharers)
+            self.net.path_cost(self.device.id,i,furthest_sharer,i,self.device.id)
             #Evict from all sharers
             for hostid in dentry.sharers:
                 self.hosts[hostid].evict(addr)
@@ -367,6 +438,10 @@ class CoherenceEngine:
         switchid = self.device.search_entry_switch(addr)
         dir_holder = None
         
+        #Needed for path costs
+        i = self.net.intermediate
+        path_cost = 0
+        
         #Check if entry exists on switch or device
         if self.device.search_entry_device(addr):
             hit = True
@@ -386,8 +461,10 @@ class CoherenceEngine:
             assert dentry.state != DirectoryState.I
             #If line is in Modified state
             if dentry.state == DirectoryState.A:
+                old_owner = dentry.owner
                 #If requestor is also owner, pass
                 if requestor == dentry.owner:
+                    #No cost, wont be a CXL access
                     pass
                 else:
                     #If its a read
@@ -405,6 +482,9 @@ class CoherenceEngine:
                             self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr))
                         #Add requestor to list of sharers
                         dentry.sharers.append(requestor)
+                        #Calculate path
+                        #requestor -> dir -> owner -> dir -> requestor
+                        path_cost = self.net.path_cost(requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor)
                     else:
                         #Allocate on requestor
                         replacement_addr = self.hosts[requestor].allocate(addr)
@@ -415,15 +495,19 @@ class CoherenceEngine:
                         self.hosts[dentry.owner].evict(addr)
                         #Set requestor as new owner
                         dentry.owner = requestor
+                        #Calculate path
+                        #requestor -> dir -> owner -> dir -> requestor
+                        path_cost = self.net.path_cost(requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor)
                     #Write the updated dentry
                     dir_holder.set_line(addr,dentry)
             elif dentry.state == DirectoryState.S:
+                old_sharer_list = dentry.sharers[:]
                 #If operation is read
                 if optype == OpType.READ:
                     #If requestor is a sharer, dont do anything
                     if requestor in dentry.sharers:
                         pass
-                    #Add requstor
+                    #Add requestor
                     else:
                         #Allocate on the requesting host
                         replacement_addr = self.hosts[requestor].allocate(addr)
@@ -434,8 +518,17 @@ class CoherenceEngine:
                         dentry.sharers.append(requestor)
                         #Write the updated entry
                         dir_holder.set_line(addr,dentry)
+                        #Calculate path
+                        #requestor -> dir -> closest sharer -> dir -> requestor
+                        closest_sharer = self.net.closest_node(requestor,old_sharer_list)
+                        path_cost = self.net.path_cost(requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor)
                 #If operation is write
                 else:
+                    #Allocate on the requesting host
+                    replacement_addr = self.hosts[requestor].allocate(addr)
+                    #If there is any replacement, handle it
+                    if replacement_addr != None:
+                        self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr))
                     #Remove the line from all sharers
                     for hostid in dentry.sharers:
                         #Evict line from all hosts
@@ -450,11 +543,15 @@ class CoherenceEngine:
                     #Set new state
                     dentry.state = DirectoryState.A
                     dir_holder.set_line(addr,dentry)
+                    #Calculate path
+                    #requestor -> dir -> furthest sharer -> dir -> requestor
+                    farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
+                    path_cost = self.net.path_cost(requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor)
         else:
             #We dont have the directory entry
             #Need to allocate it
             #Find the destination to allocate
-            destination_id = self.device.placement_policy(addr,optype,requestor)
+            destination_id = self.device.placement_policy(addr,optype,requestor,self.net.intermediate_path,self.reqid)
             #Get destination object
             destination = self.device.resolve_object(destination_id)
             #Allocate on the destination
@@ -475,7 +572,11 @@ class CoherenceEngine:
             replacement_addr = self.hosts[requestor].allocate(addr)
             if replacement_addr != None:
                 self.handle_host_eviction(replacement_addr,destination.get_line(replacement_addr))
-                        
+                
+            #Calculate path
+            #requestor -> device -> requestor
+            path_cost = self.net.path_cost(requestor,i,self.device.id,i,requestor)
+            
         #Once coherence operations are complete, check if we want to migrate the entry
         self.migration_policy()
         
@@ -546,7 +647,18 @@ if __name__ == "__main__":
     
     device.set_switches(switches)
     
+    N = CXLNet(num_hosts=4,num_devices=1,num_switches=9)
+    #Build the network topology
+    edges = [(5,6),(6,7),(8,9),(9,10),(11,12),(12,13),
+             (5,8),(6,9),(7,10),(8,11),(9,12),(10,13),
+             (0,8),(1,5),(2,6),(3,7),(4,11)]
+    N.G.add_edges_from(edges)
+    N.draw()
+    
+    N.set_intermediate(8,[11,8])
+    
     simulator = CoherenceEngine(hosts, device, switches)
+    simulator.add_network(N)
     simulator.describe()
     
     with open(trace_file) as file:
@@ -561,12 +673,5 @@ if __name__ == "__main__":
             
             simulator.process_req(addr,rw,hostid)
     
-    N = CXLNet(num_hosts=4,num_devices=1,num_switches=9)
-    #Build the network topology
-    edges = [(5,6),(6,7),(8,9),(9,10),(11,12),(12,13),
-             (5,8),(6,9),(7,10),(8,11),(9,12),(10,13),
-             (0,8),(1,5),(2,6),(3,7),(4,11)]
-    N.G.add_edges_from(edges)
-    N.draw()
     
     
