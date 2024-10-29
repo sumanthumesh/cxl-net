@@ -7,7 +7,7 @@ from cache import cachesim
 from typing import List, Dict, Set, Tuple
 import json
 
-cachesim.DEBUG = True
+# cachesim.DEBUG = True
 cachesim.ADDR_WIDTH = 64
 
 class CXLNet:
@@ -207,6 +207,13 @@ class CXLDevice(SnoopFilter):
         if self.set_full(setid):
             #Find replacement candidate
             replacement_addr = self.replacement_candidate(addr)
+            #Invalidate the sharers or owner
+            dentry = self.find_directory_entry(replacement_addr)
+            if dentry.state == DirectoryState.A:
+                self.hosts[dentry.owner].evict()
+            elif dentry.state == DirectoryState.S:
+                for hostid in dentry.sharers:
+                    self.hosts[hostid].evict()
             #Remove the line
             self.evict(replacement_addr)
         #Add the new line
@@ -417,7 +424,7 @@ class CoherenceEngine:
                 self.verify_line(line.addr)
         for switch in self.switches.values():
             for cacheset in switch.entries:
-                for tag,line in cacheset:
+                for tag,line in cacheset.items():
                     self.verify_line(line.addr)
         debug_print(f"System state verified")
     
@@ -428,12 +435,16 @@ class CoherenceEngine:
         
         ########################
         #For debugging help
-        if self.reqid == 800:
+        if self.reqid == 29337:
+            # cachesim.DEBUG = True
             pass
         ########################
 
-        print(f"{self.reqid}: {hex(addr)} {optype} {requestor}")
+        debug_print(f"{self.reqid}: {hex(addr)} {optype} {requestor}")
+        # print(f"{self.reqid}: {hex(addr)} {optype} {requestor}")
 
+        if self.reqid % 10000 == 0:
+            print(self.reqid)
         hit = False
         switchid = self.device.search_entry_switch(addr)
         dir_holder = None
@@ -445,14 +456,14 @@ class CoherenceEngine:
         #Check if entry exists on switch or device
         if self.device.search_entry_device(addr):
             hit = True
-            print(f"Entry found in device")
+            debug_print(f"Entry found in device")
             dir_holder = self.device
         elif switchid != None:
             hit = True
-            print(f"Entry found on switch {switchid}")
+            debug_print(f"Entry found on switch {switchid}")
             dir_holder = self.device.switches[switchid]
         else:
-            print(f"Line {hex(addr)} not found")
+            debug_print(f"Line {hex(addr)} not found")
             
         if hit:
             dentry: DirectoryEntry = dir_holder.get_line(addr)
@@ -565,9 +576,9 @@ class CoherenceEngine:
                 dentry.sharers = []
                 dentry.owner = requestor
             replacement_addr = destination.allocate(addr,dentry)
-            #Handle the replacement                    
-            if replacement_addr != None:
-                self.handle_directory_eviction(replacement_addr,destination.get_line(replacement_addr))
+            # #Handle the replacement                    
+            # if replacement_addr != None:
+            #     self.handle_directory_eviction(replacement_addr,destination.get_line(replacement_addr))
             #Give host copy of the line
             replacement_addr = self.hosts[requestor].allocate(addr)
             if replacement_addr != None:
@@ -606,7 +617,7 @@ class CoherenceEngine:
             for hostid in dentry.sharers:
                 assert self.hosts[hostid].check_hit(addr), f"Host {hostid} is sharer, but does not have copy of the line"
         
-        self.verify_system_state()
+        # self.verify_system_state()
 
         self.reqid += 1
 
@@ -634,12 +645,21 @@ class Config:
         self.switch_num_lines = d["Switch num lines"]
         self.switch_assoc = d["Switch assoc"]
 
+    def print(self):
+        #Write the config onto console
+        print("#####################")
+        print("Config")
+        for key,val in self.d.items():
+            print(f"{key}:{val}")
+        print("#####################")
+
 if __name__ == "__main__":
     
     config_file = sys.argv[1]
     trace_file = sys.argv[2]
     
     cfg = Config(config_file)
+    cfg.print()
     
     hosts = [CXLHost(cfg.host_line_size,cfg.host_num_lines,cfg.host_assoc,i) for i in range(cfg.num_hosts)]
     device = CXLDevice(cfg.device_line_size,cfg.device_num_lines,cfg.device_assoc,cfg.num_hosts)
