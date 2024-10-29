@@ -307,7 +307,6 @@ class CoherenceEngine:
         '''
         Invariants for a single line
         '''
-        
         # Fetch the line
         dentry: DirectoryEntry = self.device.find_directory_entry(addr)
         # Invariants
@@ -318,16 +317,38 @@ class CoherenceEngine:
                 f"Invalid combo, State {dentry.state}, Owner {dentry.owner}, Sharers {dentry.sharers}"
         if dentry.owner != None:
             assert self.hosts[dentry.owner].check_hit(addr), f"Owner {dentry.owner} does not have copy of line"
+            #Verify that no other host has this line
+            for host in self.hosts:
+                if host.id != dentry.owner:
+                    assert not host.check_hit(addr), f"Line found in {host.id} which is not owner {dentry.owner}"
         if len(dentry.sharers) > 0:
             for hostid in dentry.sharers:
                 assert self.hosts[hostid].check_hit(addr), f"Sharer {hostid} does not have a copy of the line"
-        
+            #Verify that no other host has this line
+            for host in self.hosts:
+                if host.id not in dentry.sharers:
+                    assert not host.check_hit(addr), f"Line found in {host.id} which is not a sharer {dentry.sharers}"
+        #Make sure directory entry is in only one location
+        num_dirs = 0
+        if self.device.check_hit(addr):
+            num_dirs += 1
+        for switchid,switch in self.switches.items():
+            if switch.check_hit(addr):
+                num_dirs += 1
+        assert num_dirs == 1, f"Line for {addr} found in {num_dirs} location instead of one"
     
     def verify_system_state(self):
         '''
         Perform lots of checks on the current system
         '''
-        
+        for cacheset in self.device.entries:
+            for tag,line in cacheset.items():
+                self.verify_line(line.addr)
+        for switch in self.switches.values():
+            for cacheset in switch.entries:
+                for tag,line in cacheset:
+                    self.verify_line(line.addr)
+        debug_print(f"System state verified")
     
     def process_req(self, addr:int, optype: OpType, requestor: int):
         '''
@@ -484,6 +505,7 @@ class CoherenceEngine:
             for hostid in dentry.sharers:
                 assert self.hosts[hostid].check_hit(addr), f"Host {hostid} is sharer, but does not have copy of the line"
         
+        self.verify_system_state()
 
         self.reqid += 1
 
