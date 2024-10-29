@@ -186,6 +186,10 @@ class CXLSwitch(HostCache):
         self.del_from_lru(addr)
         debug_print(f"Evicted {hex(self.get_addr(addr))} from Switch {self.id} in set {setid}")
         self.delete_line(tag,setid)
+        
+    def remove_sharer(self,addr,hostid):
+        tag, setid, blk = self.split_addr(addr)
+        self.entries[setid][tag].data.sharers.remove(hostid)
 
 class CXLDevice(SnoopFilter):
     
@@ -340,6 +344,8 @@ class CoherenceEngine:
         if addr == None:
             return
         
+        debug_print(f"Replacing {hex(addr)} from {evicting_host}")
+        
         i = self.net.intermediate
         
         dir_node_id = self.device.find_directory_location(addr)
@@ -356,6 +362,10 @@ class CoherenceEngine:
             #Since there is no host with valid copy left, remove directory entry
             dir_holder.evict(addr)
         elif dentry.state == DirectoryState.S:
+            if len(dentry.sharers) == 1:
+                lone_sharer = True
+            else:
+                lone_sharer = False
             #Calculate path
             #Evicting host -> device -> furthest sharer -> device
             furthest_sharer = self.net.furthest_node(self.device.id,dentry.sharers)
@@ -364,6 +374,9 @@ class CoherenceEngine:
             dir_holder.remove_sharer(addr,evicting_host)
             #Remove from host
             self.hosts[evicting_host].evict(addr)
+            #If it was a lone sharer, evict entry from directory
+            if lone_sharer:
+                dir_holder.evict(addr)
             
     def handle_directory_eviction(self,addr:int,dentry:DirectoryEntry,location:int):
         '''
@@ -372,6 +385,8 @@ class CoherenceEngine:
         
         if addr == None:
             return
+        
+        debug_print(f"Replacing {hex(addr)} from {location}")
         
         i = self.net.intermediate
         
@@ -467,7 +482,7 @@ class CoherenceEngine:
         
         ########################
         #For debugging help
-        if self.reqid == 52043:
+        if self.reqid == 40561:
             # cachesim.DEBUG = True
             pass
         ########################
@@ -524,6 +539,9 @@ class CoherenceEngine:
                         #If there is any replacement, handle it
                         if replacement_addr != None:
                             self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
+                            #Now reattempt to allocate line
+                            temp = self.hosts[requestor].allocate(addr)
+                            assert temp == None, f"Host allocation on {destination.id} failed"
                         #Add requestor to list of sharers
                         dentry.sharers.append(requestor)
                         #Calculate path
@@ -535,6 +553,9 @@ class CoherenceEngine:
                         #If there is any replacement, handle it
                         if replacement_addr != None:
                             self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
+                            #Now reattempt to allocate line
+                            temp = self.hosts[requestor].allocate(addr)
+                            assert temp == None, f"Host allocation on {destination.id} failed"
                         #Remove line from the original owner
                         self.hosts[dentry.owner].evict(addr)
                         #Set requestor as new owner
@@ -558,6 +579,9 @@ class CoherenceEngine:
                         #If there is any replacement, handle it
                         if replacement_addr != None:
                             self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
+                            #Now reattempt to allocate line
+                            temp = self.hosts[requestor].allocate(addr)
+                            assert temp == None, f"Host allocation on {destination.id} failed"
                         #Add requestor as sharer in directory
                         dentry.sharers.append(requestor)
                         #Write the updated entry
@@ -573,6 +597,9 @@ class CoherenceEngine:
                     #If there is any replacement, handle it
                     if replacement_addr != None:
                         self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
+                        #Now reattempt to allocate line
+                        temp = self.hosts[requestor].allocate(addr)
+                        assert temp == None, f"Host allocation on {destination.id} failed"
                     #Remove the line from all sharers
                     for hostid in dentry.sharers:
                         #Evict line from all hosts
