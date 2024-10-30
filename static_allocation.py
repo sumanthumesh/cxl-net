@@ -7,7 +7,7 @@ from cache import cachesim
 from typing import List, Dict, Set, Tuple
 import json
 
-# cachesim.DEBUG = True
+cachesim.DEBUG = True
 cachesim.ADDR_WIDTH = 64
 
 class CXLNet:
@@ -103,12 +103,12 @@ class CXLNet:
         '''
         return 2*(self.cost(host,self.intermediate) + self.cost(self.intermediate,dir))
     
-    def path_cost(self,*args: Tuple[int]):
+    def path_cost(self,nodes: List[int]):
         '''
         Given a set of nodes, this will give the path cost travelling along these nodes
         '''
+        debug_print(f"Path: {nodes}")
         cost = 0
-        nodes = args
         for window in zip(nodes,nodes[1:]):
             cost += nx.shortest_path_length(self.G,source=window[0],target=window[1])
         debug_print(f"Path: {nodes}, Cost: {cost}")
@@ -307,8 +307,10 @@ class CXLDevice(SnoopFilter):
         possible_dir_locations = intermediate_path + [self.id]
         #Choose based on modulus
         return possible_dir_locations[reqid % len(possible_dir_locations)]
-        # #For now always place on the device
+        #For now always place on the device
         # return self.id
+        #Place always on end switch
+        # return 11
 
 class CoherenceEngine:
     
@@ -320,7 +322,9 @@ class CoherenceEngine:
         self.net: CXLNet = None
         
         self.reqid = 0
-        
+    
+        self.cost_benefit_entries: List[Tuple[int]] = []
+    
     def describe(self):
         '''
         Print out a system description with node ids
@@ -337,6 +341,21 @@ class CoherenceEngine:
         '''
         self.net=net
 
+    def static_path_benefit(self,in_network_path:List[int],base_path:List[int]):
+        '''
+        Record or assess the benefits from static allocation
+        '''
+        in_network_cost = self.net.path_cost(in_network_path)
+        base_cost = self.net.path_cost(base_path)
+        if in_network_cost > base_cost:
+            debug_print(f"Deteriorated path {self.reqid}")
+        elif in_network_cost < base_cost:
+            debug_print(f"Improved path {self.reqid}")
+        else:
+            debug_print(f"Unchanged path {self.reqid}")
+            
+        self.cost_benefit_entries.append((in_network_cost,base_cost))
+
     def handle_host_eviction(self,addr:int,dentry:DirectoryEntry,evicting_host:int):
         '''
         When a host chooses to evict an entry, need to update device about it
@@ -345,6 +364,7 @@ class CoherenceEngine:
             return
         
         debug_print(f"Replacing {hex(addr)} from {evicting_host}")
+        debug_print(f"Current state {hex(addr)}:{dentry}")
         
         i = self.net.intermediate
         
@@ -357,7 +377,10 @@ class CoherenceEngine:
         if dentry.state == DirectoryState.A:
             #Calculate path
             #owner -> device -> owner
-            self.net.path_cost(dentry.owner,i,self.device.id,i,dentry.owner)
+            path = [dentry.owner,i,self.device.id,i,dentry.owner]
+            base_path = [dentry.owner,self.device.id,dentry.owner]
+            self.static_path_benefit(path,base_path)
+            debug_print("Here check it out 1")
             self.hosts[dentry.owner].evict(addr)
             #Since there is no host with valid copy left, remove directory entry
             dir_holder.evict(addr)
@@ -367,9 +390,7 @@ class CoherenceEngine:
             else:
                 lone_sharer = False
             #Calculate path
-            #Evicting host -> device -> furthest sharer -> device
             furthest_sharer = self.net.furthest_node(self.device.id,dentry.sharers)
-            self.net.path_cost(evicting_host,i,self.device.id,furthest_sharer,i,self.device.id)
             #Remove from sharer list
             dir_holder.remove_sharer(addr,evicting_host)
             #Remove from host
@@ -377,6 +398,19 @@ class CoherenceEngine:
             #If it was a lone sharer, evict entry from directory
             if lone_sharer:
                 dir_holder.evict(addr)
+                #Path
+                #Evicting host -> device -> Evicting host
+                path = [evicting_host,i,self.device.id,i,evicting_host]
+                base_path = [evicting_host,self.device.id,evicting_host]
+                self.static_path_benefit(path,base_path)
+                debug_print("Here check it out 2")
+            else:
+                #Evicting host -> dir location -> evicting host
+                path = [evicting_host,i,dir_node_id,i,evicting_host]
+                base_path = [evicting_host,dir_node_id,evicting_host]
+                self.static_path_benefit(path,base_path)
+                debug_print("Here check it out 3")
+                
             
     def handle_directory_eviction(self,addr:int,dentry:DirectoryEntry,location:int):
         '''
@@ -387,20 +421,27 @@ class CoherenceEngine:
             return
         
         debug_print(f"Replacing {hex(addr)} from {location}")
+        debug_print(f"Current state {hex(addr)}:{dentry}")
         
         i = self.net.intermediate
         
         if dentry.state == DirectoryState.A:
             #Calculate path
-            #device -> owner -> device
-            self.net.path_cost(self.device.id,i,dentry.owner,i,self.device.id)
+            #dir location -> owner -> device
+            path = [location,i,dentry.owner,i,self.device.id]
+            base_path = [self.device.id,dentry.owner,self.device.id]
+            self.static_path_benefit(path,base_path)
+            debug_print("Here check it out 4")
             #Evict from owner
             self.hosts[dentry.owner].evict(addr)
         elif dentry.state == DirectoryState.S:
             #Calculate path
-            #device -> furthest sharer -> device
-            furthest_sharer = self.net.furthest_node(device.id,dentry.sharers)
-            self.net.path_cost(self.device.id,i,furthest_sharer,i,self.device.id)
+            #dir location -> furthest sharer -> device
+            furthest_sharer = self.net.furthest_node(location,dentry.sharers)
+            path = [location,i,furthest_sharer,i,self.device.id]
+            base_path = [self.device.id,furthest_sharer,self.device.id]
+            self.static_path_benefit(path,base_path)
+            debug_print("Here check it out 5")
             #Evict from all sharers
             for hostid in dentry.sharers:
                 self.hosts[hostid].evict(addr)
@@ -466,12 +507,12 @@ class CoherenceEngine:
                 for tag,line in cacheset.items():
                     self.verify_line(line.addr)
         
-        #Check LRU of all nodes
-        # for hostid in self.net.host_ids:
-        #     self.hosts[hostid].verify_lru()
-        # self.device.verify_lru()
-        # for switchid in self.net.switch_ids:
-        #     self.switches[switchid].verify_lru()
+        # Check LRU of all nodes
+        for hostid in self.net.host_ids:
+            self.hosts[hostid].verify_lru()
+        self.device.verify_lru()
+        for switchid in self.net.switch_ids:
+            self.switches[switchid].verify_lru()
         
         debug_print(f"System state verified")
     
@@ -482,7 +523,7 @@ class CoherenceEngine:
         
         ########################
         #For debugging help
-        if self.reqid == 40561:
+        if self.reqid == 23097:
             # cachesim.DEBUG = True
             pass
         ########################
@@ -546,7 +587,10 @@ class CoherenceEngine:
                         dentry.sharers.append(requestor)
                         #Calculate path
                         #requestor -> dir -> owner -> dir -> requestor
-                        path_cost = self.net.path_cost(requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor)
+                        path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
+                        base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
+                        path_cost = self.static_path_benefit(path,base_path)
+                        debug_print("Here check it out 6")
                     else:
                         #Allocate on requestor
                         replacement_addr = self.hosts[requestor].allocate(addr)
@@ -562,7 +606,10 @@ class CoherenceEngine:
                         dentry.owner = requestor
                         #Calculate path
                         #requestor -> dir -> owner -> dir -> requestor
-                        path_cost = self.net.path_cost(requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor)
+                        path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
+                        base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
+                        path_cost = self.static_path_benefit(path,base_path)
+                        debug_print("Here check it out 7")
                     #Write the updated dentry
                     dir_holder.set_line(addr,dentry)
             elif dentry.state == DirectoryState.S:
@@ -589,24 +636,46 @@ class CoherenceEngine:
                         #Calculate path
                         #requestor -> dir -> closest sharer -> dir -> requestor
                         closest_sharer = self.net.closest_node(requestor,old_sharer_list)
-                        path_cost = self.net.path_cost(requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor)
+                        path = [requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor]
+                        base_path = [requestor,self.device.id,closest_sharer,self.device.id,requestor]
+                        path_cost = self.static_path_benefit(path,base_path)
+                        debug_print("Here check it out 8")
                 #If operation is write
                 else:
-                    #Allocate on the requesting host
-                    replacement_addr = self.hosts[requestor].allocate(addr)
-                    #If there is any replacement, handle it
-                    if replacement_addr != None:
-                        self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
-                        #Now reattempt to allocate line
-                        temp = self.hosts[requestor].allocate(addr)
-                        assert temp == None, f"Host allocation on {destination.id} failed"
-                    #Remove the line from all sharers
-                    for hostid in dentry.sharers:
-                        #Evict line from all hosts
-                        #Dont remove it from requestor in case it is part of sharers
-                        if hostid == requestor:
-                            continue
-                        self.hosts[hostid].evict(addr)
+                    #Requestor already has line and is only sharer
+                    if requestor in dentry.sharers and len(dentry.sharers) == 1:
+                        # Requestor only needs permission, not data
+                        #Calculate path
+                        #requestor -> dir -> requestor
+                        path = [requestor,i,dir_holder.id,i,requestor]
+                        base_path = [requestor,self.device.id,requestor]
+                        path_cost = self.static_path_benefit(path,base_path)
+                        debug_print("Here check it out 9")
+                    else:
+                        #req -> dir -> furthest sharer -> dir -> req
+                        farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
+                        path = [requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor]
+                        base_path = [requestor,self.device.id,farthest_sharer,self.device.id,requestor]
+                        path_cost = self.static_path_benefit(path,base_path)
+                        debug_print("Here check it out 10")
+                        
+                        if requestor not in dentry.sharers:
+                            # Requestor needs data, dir needs acknowledgements
+                            #Allocate on the requesting host
+                            replacement_addr = self.hosts[requestor].allocate(addr)
+                            #If there is any replacement, handle it
+                            if replacement_addr != None:
+                                self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
+                                #Now reattempt to allocate line
+                                temp = self.hosts[requestor].allocate(addr)
+                                assert temp == None, f"Host allocation on {destination.id} failed"
+                        #Remove the line from all sharers
+                        for hostid in dentry.sharers:
+                            #Evict line from all hosts
+                            #Dont remove it from requestor in case it is part of sharers
+                            if hostid == requestor:
+                                continue
+                            self.hosts[hostid].evict(addr)
                     #Empty the sharer list
                     dentry.sharers = []
                     #Set reuestor as owner
@@ -614,10 +683,6 @@ class CoherenceEngine:
                     #Set new state
                     dentry.state = DirectoryState.A
                     dir_holder.set_line(addr,dentry)
-                    #Calculate path
-                    #requestor -> dir -> furthest sharer -> dir -> requestor
-                    farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
-                    path_cost = self.net.path_cost(requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor)
         else:
             #We dont have the directory entry
             #Need to allocate it
@@ -652,7 +717,10 @@ class CoherenceEngine:
                 
             #Calculate path
             #requestor -> device -> requestor
-            path_cost = self.net.path_cost(requestor,i,self.device.id,i,requestor)
+            path = [requestor,i,self.device.id,i,requestor]
+            base_path = [requestor,self.device.id,requestor]
+            path_cost = self.static_path_benefit(path,base_path)
+            debug_print("Here check it out 11")
             
         #Once coherence operations are complete, check if we want to migrate the entry
         self.migration_policy()
@@ -683,7 +751,8 @@ class CoherenceEngine:
             for hostid in dentry.sharers:
                 assert self.hosts[hostid].check_hit(addr), f"Host {hostid} is sharer, but does not have copy of the line"
         
-        self.verify_system_state()
+        if self.reqid % 1000000 == 0:
+            self.verify_system_state()
 
         self.reqid += 1
 
@@ -710,6 +779,8 @@ class Config:
         self.switch_line_size = d["Switch line size"]
         self.switch_num_lines = d["Switch num lines"]
         self.switch_assoc = d["Switch assoc"]
+        self.intermediate = d["Intermediate switch"]
+        self.intermediate_path = d["Intermediate path"]
 
     def print(self):
         #Write the config onto console
@@ -741,7 +812,7 @@ if __name__ == "__main__":
     N.G.add_edges_from(edges)
     N.draw()
     
-    N.set_intermediate(8,[11,8])
+    N.set_intermediate(cfg.intermediate,cfg.intermediate_path)
     
     simulator = CoherenceEngine(hosts, device, switches)
     simulator.add_network(N)
@@ -759,6 +830,29 @@ if __name__ == "__main__":
             
             simulator.process_req(addr,rw,hostid)
     print(f"Finished processing requests without triggering any assertions")
+    
+    #Process the cost benefit data
+    
+    stats = {
+        "Improved":0,
+        "Same":0,
+        "Deteriorated":0,
+        "Benefit":0
+    }
+    
+    for pair in simulator.cost_benefit_entries:
+        stats["Benefit"] += pair[1]-pair[0]
+        if pair[0] < pair[1]:
+            stats["Improved"] += 1
+        elif pair[0] > pair[1]:
+            stats["Deteriorated"] += 1
+        else:
+            stats["Same"] += 1
+            
+    print(stats)
+    print(f"Num Entries: {len(simulator.cost_benefit_entries)}")
+    print(f"Avg Benefit {stats['Benefit']/len(simulator.cost_benefit_entries)}")
+        
     
     
     
