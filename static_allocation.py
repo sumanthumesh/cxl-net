@@ -7,7 +7,7 @@ from cache import cachesim
 from typing import List, Dict, Set, Tuple
 import json
 
-cachesim.DEBUG = True
+# cachesim.DEBUG = True
 cachesim.ADDR_WIDTH = 64
 
 class CXLNet:
@@ -323,7 +323,29 @@ class CoherenceEngine:
         
         self.reqid = 0
     
-        self.cost_benefit_entries: List[Tuple[int]] = []
+        #Different communication flows for which we can track hops
+        self.communication_flows = {
+            1: "Host initiated eviction from owner, delete directory",
+            2: "Host initiated eviction from lone sharer, delete directory",
+            3: "Host initiated eviction from one of multiple sharers",
+            4: "Directory initiated eviction from owner, directory deleted",
+            5: "Directory initiated eviction from all sharers, directory deleted",
+            6: "Request shared permission for a line that is exclusively owned by another host",
+            7: "Request exclusive permission for a line that is exclusively owned by another host",
+            8: "Request shared permission for a line that is shared by another host",
+            9: "Request exclusive permission for a line that is solely shared by the current host",
+            10: "Request exclusive permission for a line that is shared by other hosts",
+            11: "Request an invalid line"
+        }
+        
+        #Record of different communication paths
+        self.flow_records: Dict[int, Dict[str,int]] = {key:{
+                                    "Improved":0,
+                                    "Same":0,
+                                    "Deteriorated":0,
+                                    "Benefit":0
+                                 } 
+                             for key in self.communication_flows.keys()}
     
     def describe(self):
         '''
@@ -341,7 +363,7 @@ class CoherenceEngine:
         '''
         self.net=net
 
-    def static_path_benefit(self,in_network_path:List[int],base_path:List[int]):
+    def static_path_benefit(self,in_network_path:List[int],base_path:List[int],path_type:int):
         '''
         Record or assess the benefits from static allocation
         '''
@@ -349,12 +371,16 @@ class CoherenceEngine:
         base_cost = self.net.path_cost(base_path)
         if in_network_cost > base_cost:
             debug_print(f"Deteriorated path {self.reqid}")
+            self.flow_records[path_type]["Deteriorated"] += 1
         elif in_network_cost < base_cost:
             debug_print(f"Improved path {self.reqid}")
+            self.flow_records[path_type]["Improved"] += 1
         else:
             debug_print(f"Unchanged path {self.reqid}")
-            
-        self.cost_benefit_entries.append((in_network_cost,base_cost))
+            self.flow_records[path_type]["Same"] += 1
+        
+        #Record this path flow
+        self.flow_records[path_type]["Benefit"] += base_cost - in_network_cost
 
     def handle_host_eviction(self,addr:int,dentry:DirectoryEntry,evicting_host:int):
         '''
@@ -379,7 +405,7 @@ class CoherenceEngine:
             #owner -> device -> owner
             path = [dentry.owner,i,self.device.id,i,dentry.owner]
             base_path = [dentry.owner,self.device.id,dentry.owner]
-            self.static_path_benefit(path,base_path)
+            self.static_path_benefit(path,base_path,1)
             debug_print("Here check it out 1")
             self.hosts[dentry.owner].evict(addr)
             #Since there is no host with valid copy left, remove directory entry
@@ -402,13 +428,13 @@ class CoherenceEngine:
                 #Evicting host -> device -> Evicting host
                 path = [evicting_host,i,self.device.id,i,evicting_host]
                 base_path = [evicting_host,self.device.id,evicting_host]
-                self.static_path_benefit(path,base_path)
+                self.static_path_benefit(path,base_path,2)
                 debug_print("Here check it out 2")
             else:
                 #Evicting host -> dir location -> evicting host
                 path = [evicting_host,i,dir_node_id,i,evicting_host]
                 base_path = [evicting_host,dir_node_id,evicting_host]
-                self.static_path_benefit(path,base_path)
+                self.static_path_benefit(path,base_path,3)
                 debug_print("Here check it out 3")
                 
             
@@ -430,7 +456,7 @@ class CoherenceEngine:
             #dir location -> owner -> device
             path = [location,i,dentry.owner,i,self.device.id]
             base_path = [self.device.id,dentry.owner,self.device.id]
-            self.static_path_benefit(path,base_path)
+            self.static_path_benefit(path,base_path,4)
             debug_print("Here check it out 4")
             #Evict from owner
             self.hosts[dentry.owner].evict(addr)
@@ -440,7 +466,7 @@ class CoherenceEngine:
             furthest_sharer = self.net.furthest_node(location,dentry.sharers)
             path = [location,i,furthest_sharer,i,self.device.id]
             base_path = [self.device.id,furthest_sharer,self.device.id]
-            self.static_path_benefit(path,base_path)
+            self.static_path_benefit(path,base_path,5)
             debug_print("Here check it out 5")
             #Evict from all sharers
             for hostid in dentry.sharers:
@@ -515,6 +541,28 @@ class CoherenceEngine:
             self.switches[switchid].verify_lru()
         
         debug_print(f"System state verified")
+        
+    def print_flow_records(self):
+        
+        total_improved_count = 0
+        total_same_count = 0
+        total_deteriorated_count = 0
+        total_benefit = 0
+        #First print per path type records
+        for path_type,stats in self.flow_records.items():
+            print(f"Type: {self.communication_flows[path_type]}")
+            total_improved_count += stats["Improved"]
+            total_same_count += stats["Same"]
+            total_deteriorated_count += stats["Deteriorated"]
+            total_benefit += stats["Benefit"]
+            for key,val in stats.items():
+                print(f"{key}:{val}")
+            print(f"AVG Benefit: {stats['Benefit']/(stats['Improved']+stats['Same']+stats['Deteriorated'])}")
+        #Print aggregate results
+        print(f"Total Improved: {total_improved_count}")
+        print(f"Total Same: {total_same_count}")
+        print(f"Total Deteriorated: {total_deteriorated_count}")
+        print(f"Overall AVG benefit: {total_benefit/(total_improved_count+total_same_count+total_deteriorated_count)}")
     
     def process_req(self, addr:int, optype: OpType, requestor: int):
         '''
@@ -589,7 +637,7 @@ class CoherenceEngine:
                         #requestor -> dir -> owner -> dir -> requestor
                         path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
-                        path_cost = self.static_path_benefit(path,base_path)
+                        path_cost = self.static_path_benefit(path,base_path,6)
                         debug_print("Here check it out 6")
                     else:
                         #Allocate on requestor
@@ -608,7 +656,7 @@ class CoherenceEngine:
                         #requestor -> dir -> owner -> dir -> requestor
                         path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
-                        path_cost = self.static_path_benefit(path,base_path)
+                        path_cost = self.static_path_benefit(path,base_path,7)
                         debug_print("Here check it out 7")
                     #Write the updated dentry
                     dir_holder.set_line(addr,dentry)
@@ -638,7 +686,7 @@ class CoherenceEngine:
                         closest_sharer = self.net.closest_node(requestor,old_sharer_list)
                         path = [requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,closest_sharer,self.device.id,requestor]
-                        path_cost = self.static_path_benefit(path,base_path)
+                        path_cost = self.static_path_benefit(path,base_path,8)
                         debug_print("Here check it out 8")
                 #If operation is write
                 else:
@@ -649,14 +697,14 @@ class CoherenceEngine:
                         #requestor -> dir -> requestor
                         path = [requestor,i,dir_holder.id,i,requestor]
                         base_path = [requestor,self.device.id,requestor]
-                        path_cost = self.static_path_benefit(path,base_path)
+                        path_cost = self.static_path_benefit(path,base_path,9)
                         debug_print("Here check it out 9")
                     else:
                         #req -> dir -> furthest sharer -> dir -> req
                         farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
                         path = [requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,farthest_sharer,self.device.id,requestor]
-                        path_cost = self.static_path_benefit(path,base_path)
+                        path_cost = self.static_path_benefit(path,base_path,10)
                         debug_print("Here check it out 10")
                         
                         if requestor not in dentry.sharers:
@@ -719,7 +767,7 @@ class CoherenceEngine:
             #requestor -> device -> requestor
             path = [requestor,i,self.device.id,i,requestor]
             base_path = [requestor,self.device.id,requestor]
-            path_cost = self.static_path_benefit(path,base_path)
+            path_cost = self.static_path_benefit(path,base_path,11)
             debug_print("Here check it out 11")
             
         #Once coherence operations are complete, check if we want to migrate the entry
@@ -833,25 +881,7 @@ if __name__ == "__main__":
     
     #Process the cost benefit data
     
-    stats = {
-        "Improved":0,
-        "Same":0,
-        "Deteriorated":0,
-        "Benefit":0
-    }
-    
-    for pair in simulator.cost_benefit_entries:
-        stats["Benefit"] += pair[1]-pair[0]
-        if pair[0] < pair[1]:
-            stats["Improved"] += 1
-        elif pair[0] > pair[1]:
-            stats["Deteriorated"] += 1
-        else:
-            stats["Same"] += 1
-            
-    print(stats)
-    print(f"Num Entries: {len(simulator.cost_benefit_entries)}")
-    print(f"Avg Benefit {stats['Benefit']/len(simulator.cost_benefit_entries)}")
+    print(simulator.print_flow_records())
         
     
     
