@@ -542,7 +542,7 @@ class CoherenceEngine:
         
         debug_print(f"System state verified")
         
-    def print_flow_records(self):
+    def print_flow_records(self,filename:str):
         
         total_improved_count = 0
         total_same_count = 0
@@ -558,6 +558,19 @@ class CoherenceEngine:
             for key,val in stats.items():
                 print(f"{key}:{val}")
             print(f"AVG Benefit: {stats['Benefit']/(stats['Improved']+stats['Same']+stats['Deteriorated'])}")
+            
+        self.flow_records[-1] = {
+            "Type" : "Overall",
+            "Improved" : total_improved_count,
+            "Same" : total_same_count,
+            "Deteriorated" : total_deteriorated_count,
+            "Benefit" : total_benefit,
+            "AVG Benefit" : total_benefit/(total_improved_count+total_same_count+total_deteriorated_count)
+        }
+        
+        with open(filename,"w") as file:
+            json.dump(self.flow_records,file,indent=4)
+        
         #Print aggregate results
         print(f"Total Improved: {total_improved_count}")
         print(f"Total Same: {total_same_count}")
@@ -829,6 +842,7 @@ class Config:
         self.switch_assoc = d["Switch assoc"]
         self.intermediate = d["Intermediate switch"]
         self.intermediate_path = d["Intermediate path"]
+        self.output_json = d["Output json"]
 
     def print(self):
         #Write the config onto console
@@ -881,7 +895,7 @@ if __name__ == "__main__":
     
     #Process the cost benefit data
     
-    print(simulator.print_flow_records())
+    print(simulator.print_flow_records(cfg.output_json))
         
     
     
