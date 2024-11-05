@@ -298,20 +298,6 @@ class CXLDevice(SnoopFilter):
         else:
             return None
                 
-    
-    def placement_policy(self,addr:int,optype:OpType,requestor:int,intermediate_path:List[int],reqid:int):
-        '''
-        Function implements the placement policy. It returns the node id where we need to allocate the entry for a new line that was previously in the invalid state
-        '''
-        #Randomly place on device or switches
-        possible_dir_locations = intermediate_path + [self.id]
-        #Choose based on modulus
-        return possible_dir_locations[reqid % len(possible_dir_locations)]
-        #For now always place on the device
-        # return self.id
-        #Place always on end switch
-        # return 11
-
 class CoherenceEngine:
     
     def __init__(self, hosts: List[CXLHost], device: CXLDevice, switches: Dict[int,CXLSwitch]):
@@ -349,6 +335,9 @@ class CoherenceEngine:
         
         #Data about which host or host pairs are doing most of the communication
         self.communicating_hosts: Dict[Set[int],int] = dict()
+    
+    def set_placement_policy(self,policy:str):
+        self.placement_policy = policy
     
     def describe(self):
         '''
@@ -488,7 +477,22 @@ class CoherenceEngine:
         else:
             self.switches[location].evict(addr)
         
+    def placement_policy(self,addr:int,optype:OpType,requestor:int,intermediate_path:List[int],reqid:int):
+        '''
+        Function implements the placement policy. It returns the node id where we need to allocate the entry for a new line that was previously in the invalid state
+        '''
         
+        #Choose between multiple placement policies
+        if self.placement_policy == "modulo":
+        #Randomly place on device or switches
+        #Choose based on modulus
+            possible_dir_locations = intermediate_path + [self.device.id]
+            return possible_dir_locations[reqid % len(possible_dir_locations)]
+        elif self.placement_policy == "default":
+        #Choose only the device as possible directory location    
+            return self.device.id    
+        else:
+            print("Unknown placement policy")
     
     def migration_policy(self):
         '''
@@ -766,7 +770,7 @@ class CoherenceEngine:
             #We dont have the directory entry
             #Need to allocate it
             #Find the destination to allocate
-            destination_id = self.device.placement_policy(addr,optype,requestor,self.net.intermediate_path,self.reqid)
+            destination_id = self.placement_policy(addr,optype,requestor,self.net.intermediate_path,self.reqid)
             #Get destination object
             destination = self.device.resolve_object(destination_id)
             #Allocate on the destination
@@ -861,6 +865,7 @@ class Config:
         self.intermediate = d["Intermediate switch"]
         self.intermediate_path = d["Intermediate path"]
         self.output_json = d["Output json"]
+        self.placement_policy = d["Placement policy"]
 
     def print(self):
         #Write the config onto console
