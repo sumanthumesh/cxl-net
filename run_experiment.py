@@ -6,7 +6,7 @@ from typing import List, Tuple, Dict, Set
 import json
 import time
 
-SCRATCHSPACE = "./scratchspace_3"
+SCRATCHSPACE = "./scratchspace/cachesize"
 PYTHON = "/mnt/nvme/umeshsum/cxl-net/venvpypy/bin/pypy3"
 VENV_COMMAND = "source venvpypy/bin/activate"
 
@@ -17,11 +17,12 @@ def run_command(cmd: str, outfile:str="temp.txt"):
     # print(cmd)
     with open(outfile,"w") as file:
         subprocess.run(cmd_args,stdout=file,stderr=file)
+        # subprocess.run(cmd_args)
     # subprocess.run(cmd,shell=True)
 
 def values_to_str(s: str):
     
-    # #Convert a nested list into a scalar array
+    #Convert a nested list into a scalar array
     # print(s[1])
     # return str(s[0]) + '_' + '_'.join([str(x) for x in s[1]])
 
@@ -81,10 +82,11 @@ if __name__ == '__main__':
     #For each tracefile we need to generate multiple config files, each config representing a different switch set as directory
     #For our case, I am setting the following switch configurations
     #Config parameters to change
-    # entries_to_change = ["Intermediate switch","Intermediate path"]
-    entries_to_change = ["Host num lines"]
+    entries_to_change = ["Host num lines","Switch num lines"]
+    # entries_to_change = ["Host num lines"]
     #Possible combinations
-    values = [[1024],[4096],[16384],[65536]]
+    # values = [[23,[23]],[27,[27]],[31,[31]],[23,[23,27,31,16]],[31,[16]]]
+    values = [[1024,1024],[4096,4096],[16384,16384],[65536,65536]]
     
     args = []
     
