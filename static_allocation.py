@@ -346,6 +346,9 @@ class CoherenceEngine:
                                     "Benefit":0
                                  } 
                              for key in self.communication_flows.keys()}
+        
+        #Data about which host or host pairs are doing most of the communication
+        self.communicating_hosts: Dict[Set[int],int] = dict()
     
     def describe(self):
         '''
@@ -381,6 +384,13 @@ class CoherenceEngine:
         
         #Record this path flow
         self.flow_records[path_type]["Benefit"] += base_cost - in_network_cost
+        
+        #Find the set of hosts involved in this transaction
+        involved_hosts = tuple(set(base_path).intersection(self.net.host_ids))
+        if involved_hosts not in self.communicating_hosts.keys():
+            self.communicating_hosts[involved_hosts] = 1
+        else:
+            self.communicating_hosts[involved_hosts] += 1
 
     def handle_host_eviction(self,addr:int,dentry:DirectoryEntry,evicting_host:int):
         '''
@@ -557,7 +567,8 @@ class CoherenceEngine:
             total_benefit += stats["Benefit"]
             for key,val in stats.items():
                 print(f"{key}:{val}")
-            print(f"AVG Benefit: {stats['Benefit']/(stats['Improved']+stats['Same']+stats['Deteriorated'])}")
+            if stats['Improved']+stats['Same']+stats['Deteriorated'] != 0:
+                print(f"AVG Benefit: {stats['Benefit']/(stats['Improved']+stats['Same']+stats['Deteriorated'])}")
             
         self.flow_records[-1] = {
             "Type" : "Overall",
@@ -576,6 +587,13 @@ class CoherenceEngine:
         print(f"Total Same: {total_same_count}")
         print(f"Total Deteriorated: {total_deteriorated_count}")
         print(f"Overall AVG benefit: {total_benefit/(total_improved_count+total_same_count+total_deteriorated_count)}")
+    
+    def print_communicating_hosts(self):
+        
+        sorted_data = dict(sorted(self.communicating_hosts.items(),key=lambda item: item[1], reverse=True))
+        
+        for hostset,count in sorted_data.items():
+            print(f"{hostset}:{count}")
     
     def process_req(self, addr:int, optype: OpType, requestor: int):
         '''
@@ -866,12 +884,45 @@ if __name__ == "__main__":
     
     device.set_switches(switches)
     
-    N = CXLNet(num_hosts=4,num_devices=1,num_switches=9)
+    # N = CXLNet(num_hosts=cfg.num_hosts,num_devices=1,num_switches=cfg.num_switches)
+    # #Build the network topology
+    # edges = [(5,6),(6,7),(8,9),(9,10),(11,12),(12,13),
+    #          (5,8),(6,9),(7,10),(8,11),(9,12),(10,13),
+    #          (0,8),(1,5),(2,6),(3,7),(4,11)]
+    # N.G.add_edges_from(edges)
+    
+    # N = CXLNet(num_hosts=cfg.num_hosts,num_devices=1,num_switches=cfg.num_switches)
+    # #Build the network topology
+    # edges = [
+    #     (17,18),(18,19),(19,20),(21,22),(22,23),(23,24),(25,26),(26,27),(27,28),(29,30),(30,31),(31,32),
+    #     (17,21),(18,22),(19,23),(20,24),(21,25),(22,26),(23,27),(24,28),(25,29),(26,30),(27,31),(28,32),
+    #     (0,17),(1,18),(2,19),(3,20),
+    #     (4,20),(5,24),(6,28),(7,32),
+    #     (8,32),(9,31),(10,30),(11,29),
+    #     (12,29),(13,25),(14,21),(15,17),
+    #     (16,31)
+    #     ]
+    # N.G.add_edges_from(edges)
+    
+    N = CXLNet(num_hosts=cfg.num_hosts,num_devices=1,num_switches=cfg.num_switches)
     #Build the network topology
-    edges = [(5,6),(6,7),(8,9),(9,10),(11,12),(12,13),
-             (5,8),(6,9),(7,10),(8,11),(9,12),(10,13),
-             (0,8),(1,5),(2,6),(3,7),(4,11)]
+    edges = [
+        (17,25),(17,26),(18,25),(18,26),
+        (19,27),(19,28),(20,27),(20,28),
+        (21,29),(21,30),(22,29),(22,30),
+        (23,31),(23,32),(24,31),(24,32),
+        (25,33),(25,34),(26,35),(26,36),
+        (27,33),(27,34),(28,35),(28,36),
+        (29,33),(29,34),(30,35),(30,36),
+        (31,33),(31,34),(32,35),(32,36),
+        (0,17),(1,17),(2,18),(3,18),
+        (4,19),(5,19),(6,20),(7,20),
+        (8,21),(9,21),(10,22),(11,22),
+        (12,23),(13,23),(14,24),(15,24),
+        (16,22)
+        ]
     N.G.add_edges_from(edges)
+    
     N.draw()
     
     N.set_intermediate(cfg.intermediate,cfg.intermediate_path)
@@ -896,6 +947,7 @@ if __name__ == "__main__":
     #Process the cost benefit data
     
     print(simulator.print_flow_records(cfg.output_json))
+    # simulator.print_communicating_hosts()
         
     
     
