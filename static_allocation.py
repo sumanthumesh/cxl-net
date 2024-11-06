@@ -531,10 +531,12 @@ class CoherenceEngine:
                 replacement_addr = self.switches[selected_switch].allocate(addr,dentry)
                 #Handle the replacement                    
                 if replacement_addr != None:
-                    self.handle_directory_eviction(replacement_addr,selected_switch.get_line(replacement_addr),selected_switch)
+                    self.handle_directory_eviction(replacement_addr,self.switches[selected_switch].get_line(replacement_addr),selected_switch)
                     #Now reattempt to allocate line
-                    temp = selected_switch.allocate(addr,dentry)
+                    temp = self.switches[selected_switch].allocate(addr,dentry)
                     assert temp == None, f"Directory allocation on {selected_switch.id} failed"
+                #Remove original entry on device
+                self.device.evict(addr)
                 return selected_switch
             else:
                 return None 
@@ -717,7 +719,7 @@ class CoherenceEngine:
                             path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
                         else:    
                             #If no migration then
-                            assert self.device.find_directory_location(addr) == dir_holder, f"Entry for {hex(addr)} not found in {dir_holder}"
+                            assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
                             #requestor -> i -> dir -> owner -> i -> dir -> requestor
                             path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
@@ -745,7 +747,7 @@ class CoherenceEngine:
                             path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
                         else:    
                             #If no migration then
-                            assert self.device.find_directory_location(addr) == dir_holder, f"Entry for {hex(addr)} not found in {dir_holder}"
+                            assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
                             #requestor -> i -> dir -> owner -> i -> dir -> requestor
                             path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
@@ -802,8 +804,10 @@ class CoherenceEngine:
                         path_cost = self.static_path_benefit(path,base_path,9)
                         debug_print("Here check it out 9")
                     else:
+                        old_owner = dentry.sharers[0]
                         #If we do migration, then the dir_holder will change
                         new_dest = self.migration_policy(addr,requestor)
+                        farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
                         if new_dest != None:
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
@@ -812,7 +816,6 @@ class CoherenceEngine:
                             #If no migration then
                             assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
                             #req -> dir -> furthest sharer -> dir -> req
-                            farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
                             path = [requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,farthest_sharer,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,10)
