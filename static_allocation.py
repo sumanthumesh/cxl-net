@@ -7,7 +7,7 @@ from cache import cachesim
 from typing import List, Dict, Set, Tuple
 import json
 
-# cachesim.DEBUG = True
+cachesim.DEBUG = True
 cachesim.ADDR_WIDTH = 64
 
 class CXLNet:
@@ -505,6 +505,7 @@ class CoherenceEngine:
         if self.migration_policy_name == "lazy":
             #Get the directory entry
             dentry:DirectoryEntry = self.device.find_directory_entry(addr)
+            dir_loc:int = self.device.find_directory_location(addr)
             #Migrate only if
             #1.Directory entry is currently on the device
             #2.There is only one current sharer
@@ -525,7 +526,7 @@ class CoherenceEngine:
                     costs[switchid] = cost
                 #Find the switch that requires the minimum cost
                 selected_switch: CXLSwitch = min(costs,key=costs.get)
-                debug_print(f"Migrating {hex(addr)} from {current_holder} to {selected_switch}")
+                debug_print(f"Migrating {hex(addr)} from {dir_loc} to {selected_switch}")
                 #Now allocate entry on this switch
                 replacement_addr = self.switches[selected_switch].allocate(addr,dentry)
                 #Handle the replacement                    
@@ -643,7 +644,7 @@ class CoherenceEngine:
         
         ########################
         #For debugging help
-        if self.reqid == 23097:
+        if self.reqid == 14315:
             # cachesim.DEBUG = True
             pass
         ########################
