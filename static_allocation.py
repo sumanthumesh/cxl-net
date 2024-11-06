@@ -646,7 +646,7 @@ class CoherenceEngine:
         
         ########################
         #For debugging help
-        if self.reqid == 14315:
+        if self.reqid == 14092:
             cachesim.DEBUG = True
             pass
         ########################
@@ -714,6 +714,8 @@ class CoherenceEngine:
                         #If we do migration, then the dir_holder will change
                         new_dest = self.migration_policy(addr,requestor)
                         if new_dest != None:
+                            #Assign new dir holder
+                            dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
                             path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
@@ -742,6 +744,8 @@ class CoherenceEngine:
                         #If we do migration, then the dir_holder will change
                         new_dest = self.migration_policy(addr,requestor)
                         if new_dest != None:
+                            #Assign new dir holder
+                            dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
                             path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
@@ -780,6 +784,8 @@ class CoherenceEngine:
                         #If we do migration, then the dir_holder will change
                         new_dest = self.migration_policy(addr,requestor)
                         if new_dest != None:
+                            #Assign new dir holder
+                            dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
                             path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
@@ -808,9 +814,10 @@ class CoherenceEngine:
                         #If we do migration, then the dir_holder will change
                         new_dest = self.migration_policy(addr,requestor)
                         #Reser dir holder
-                        dir_holder = self.device.resolve_object(new_dest)
                         farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
                         if new_dest != None:
+                            #Assign new dir holder
+                            dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
                             path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
