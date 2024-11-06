@@ -494,13 +494,46 @@ class CoherenceEngine:
         else:
             print("Unknown placement policy")
     
-    def migration_policy(self):
+    def migration_policy(self,addr:int,requestor:int):
         '''
         This function is called every transaction and performs migration of directory entry
         '''
-        #For now this is a dummy function
-        pass
-    
+        if self.migration_policy == "lazy":
+            #Get the directory entry
+            dentry:DirectoryEntry = self.device.find_directory_entry(addr)
+            #Migrate only if
+            #1.Directory entry is currently on the device
+            #2.There is only one current sharer
+            #3.The sharer is different from the requestor
+            if self.device.find_directory_location(addr) == self.device.id and \
+               (len(dentry.sharers) == 1 or dentry.owner != None) and \
+               (requestor not in dentry.sharers or requestor != dentry.owner):
+                
+                #Need to find a switch to put the directory on
+                #Idea is to find the switch which represents the shortest path
+                #Requestor -> intermediate -> selected switch -> current sharer -> intermediate -> selected switch -> requestor
+                #Aliasing
+                i = self.net.intermediate
+                current_holder = dentry.owner if dentry.state == DirectoryState.A else dentry.sharers[0]
+                costs:Dict[int,int] = dict()
+                for switchid in self.net.intermediate_path:
+                    cost = self.net.path_cost(requestor,i,switchid,current_holder,i,switchid,requestor)
+                    costs[switchid] = cost
+                #Find the switch that requires the minimum cost
+                selected_switch: CXLSwitch = min(costs,key=costs.get)
+                debug_print(f"Migrating {hex(addr)} from {current_holder} to {selected_switch}")
+                #Now allocate entry on this switch
+                replacement_addr = selected_switch.allocate(addr,dentry)
+                #Handle the replacement                    
+                if replacement_addr != None:
+                    self.handle_directory_eviction(replacement_addr,selected_switch.get_line(replacement_addr),selected_switch)
+                    #Now reattempt to allocate line
+                    temp = selected_switch.allocate(addr,dentry)
+                    assert temp == None, f"Directory allocation on {selected_switch.id} failed"
+                return selected_switch
+            else:
+                return None 
+                
     def verify_line(self,addr):
         '''
         Invariants for a single line
@@ -638,6 +671,8 @@ class CoherenceEngine:
             debug_print(f"Line {hex(addr)} not found")
             
         if hit:
+            #Entry might be lazy migrated before being served, keep in mind
+            #This migration will happen after the new request has been received
             dentry: DirectoryEntry = dir_holder.get_line(addr)
             debug_print(f"Current state: {dentry}")         
             #Check state and process accordingly
@@ -665,12 +700,21 @@ class CoherenceEngine:
                             self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
                             #Now reattempt to allocate line
                             temp = self.hosts[requestor].allocate(addr)
-                            assert temp == None, f"Host allocation on {destination.id} failed"
+                            assert temp == None, f"Host allocation on {requestor} failed"
                         #Add requestor to list of sharers
                         dentry.sharers.append(requestor)
                         #Calculate path
-                        #requestor -> dir -> owner -> dir -> requestor
-                        path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
+                        #If we do migration, then the dir_holder will change
+                        new_dest = self.migration_policy(addr,requestor)
+                        if new_dest != None:
+                            assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
+                            #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
+                            path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
+                        else:    
+                            #If no migration then
+                            assert self.device.find_directory_location(addr) == dir_holder, f"Entry for {hex(addr)} not found in {dir_holder}"
+                            #requestor -> i -> dir -> owner -> i -> dir -> requestor
+                            path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,6)
                         debug_print("Here check it out 6")
@@ -688,8 +732,17 @@ class CoherenceEngine:
                         #Set requestor as new owner
                         dentry.owner = requestor
                         #Calculate path
-                        #requestor -> dir -> owner -> dir -> requestor
-                        path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
+                        #If we do migration, then the dir_holder will change
+                        new_dest = self.migration_policy(addr,requestor)
+                        if new_dest != None:
+                            assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
+                            #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
+                            path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
+                        else:    
+                            #If no migration then
+                            assert self.device.find_directory_location(addr) == dir_holder, f"Entry for {hex(addr)} not found in {dir_holder}"
+                            #requestor -> i -> dir -> owner -> i -> dir -> requestor
+                            path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,7)
                         debug_print("Here check it out 7")
@@ -717,9 +770,18 @@ class CoherenceEngine:
                         #Write the updated entry
                         dir_holder.set_line(addr,dentry)
                         #Calculate path
-                        #requestor -> dir -> closest sharer -> dir -> requestor
-                        closest_sharer = self.net.closest_node(requestor,old_sharer_list)
-                        path = [requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor]
+                        #If we do migration, then the dir_holder will change
+                        new_dest = self.migration_policy(addr,requestor)
+                        if new_dest != None:
+                            assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
+                            #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
+                            path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
+                        else:    
+                            #If no migration then
+                            assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
+                            #requestor -> i -> dir -> closest sharer -> i -> dir -> requestor
+                            closest_sharer = self.net.closest_node(requestor,old_sharer_list)
+                            path = [requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,closest_sharer,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,8)
                         debug_print("Here check it out 8")
@@ -735,9 +797,18 @@ class CoherenceEngine:
                         path_cost = self.static_path_benefit(path,base_path,9)
                         debug_print("Here check it out 9")
                     else:
-                        #req -> dir -> furthest sharer -> dir -> req
-                        farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
-                        path = [requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor]
+                        #If we do migration, then the dir_holder will change
+                        new_dest = self.migration_policy(addr,requestor)
+                        if new_dest != None:
+                            assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
+                            #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
+                            path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
+                        else:    
+                            #If no migration then
+                            assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
+                            #req -> dir -> furthest sharer -> dir -> req
+                            farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
+                            path = [requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,farthest_sharer,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,10)
                         debug_print("Here check it out 10")
@@ -866,6 +937,7 @@ class Config:
         self.intermediate_path = d["Intermediate path"]
         self.output_json = d["Output json"]
         self.placement_policy = d["Placement policy"]
+        self.migration_policy = d["Migration policy"]
 
     def print(self):
         #Write the config onto console
