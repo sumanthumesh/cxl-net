@@ -337,7 +337,10 @@ class CoherenceEngine:
         self.communicating_hosts: Dict[Set[int],int] = dict()
     
     def set_placement_policy(self,policy:str):
-        self.placement_policy = policy
+        self.placement_policy_name = policy
+        
+    def set_migration_policy(self,policy:str):
+        self.migration_policy_name = policy
     
     def describe(self):
         '''
@@ -483,22 +486,23 @@ class CoherenceEngine:
         '''
         
         #Choose between multiple placement policies
-        if self.placement_policy == "modulo":
+        if self.placement_policy_name == "modulo":
         #Randomly place on device or switches
         #Choose based on modulus
             possible_dir_locations = intermediate_path + [self.device.id]
             return possible_dir_locations[reqid % len(possible_dir_locations)]
-        elif self.placement_policy == "default":
+        elif self.placement_policy_name == "default":
         #Choose only the device as possible directory location    
             return self.device.id    
         else:
             print("Unknown placement policy")
+            exit(2)
     
     def migration_policy(self,addr:int,requestor:int):
         '''
         This function is called every transaction and performs migration of directory entry
         '''
-        if self.migration_policy == "lazy":
+        if self.migration_policy_name == "lazy":
             #Get the directory entry
             dentry:DirectoryEntry = self.device.find_directory_entry(addr)
             #Migrate only if
@@ -517,13 +521,13 @@ class CoherenceEngine:
                 current_holder = dentry.owner if dentry.state == DirectoryState.A else dentry.sharers[0]
                 costs:Dict[int,int] = dict()
                 for switchid in self.net.intermediate_path:
-                    cost = self.net.path_cost(requestor,i,switchid,current_holder,i,switchid,requestor)
+                    cost = self.net.path_cost([requestor,i,switchid,current_holder,i,switchid,requestor])
                     costs[switchid] = cost
                 #Find the switch that requires the minimum cost
                 selected_switch: CXLSwitch = min(costs,key=costs.get)
                 debug_print(f"Migrating {hex(addr)} from {current_holder} to {selected_switch}")
                 #Now allocate entry on this switch
-                replacement_addr = selected_switch.allocate(addr,dentry)
+                replacement_addr = self.switches[selected_switch].allocate(addr,dentry)
                 #Handle the replacement                    
                 if replacement_addr != None:
                     self.handle_directory_eviction(replacement_addr,selected_switch.get_line(replacement_addr),selected_switch)
@@ -876,9 +880,6 @@ class CoherenceEngine:
             path_cost = self.static_path_benefit(path,base_path,11)
             debug_print("Here check it out 11")
             
-        #Once coherence operations are complete, check if we want to migrate the entry
-        self.migration_policy()
-        
         #Verification checks
         dentry = self.device.find_directory_entry(addr)
         #Lots of em
@@ -1006,6 +1007,8 @@ if __name__ == "__main__":
     
     simulator = CoherenceEngine(hosts, device, switches)
     simulator.add_network(N)
+    simulator.set_placement_policy(cfg.placement_policy)
+    simulator.set_migration_policy(cfg.migration_policy)
     simulator.describe()
     
     with open(trace_file) as file:
