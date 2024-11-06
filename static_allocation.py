@@ -7,7 +7,7 @@ from cache import cachesim
 from typing import List, Dict, Set, Tuple
 import json
 
-cachesim.DEBUG = True
+# cachesim.DEBUG = True
 cachesim.ADDR_WIDTH = 64
 
 class CXLNet:
@@ -647,7 +647,7 @@ class CoherenceEngine:
         ########################
         #For debugging help
         if self.reqid == 14315:
-            # cachesim.DEBUG = True
+            cachesim.DEBUG = True
             pass
         ########################
 
@@ -807,6 +807,8 @@ class CoherenceEngine:
                         old_owner = dentry.sharers[0]
                         #If we do migration, then the dir_holder will change
                         new_dest = self.migration_policy(addr,requestor)
+                        #Reser dir holder
+                        dir_holder = self.device.resolve_object(new_dest)
                         farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
                         if new_dest != None:
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
@@ -909,6 +911,9 @@ class CoherenceEngine:
         if dentry.state == DirectoryState.S:
             for hostid in dentry.sharers:
                 assert self.hosts[hostid].check_hit(addr), f"Host {hostid} is sharer, but does not have copy of the line"
+        #Line should not simultaneously exist on switch and device at the same time
+        switchid = self.device.search_entry_switch(addr)
+        assert not (self.device.search_entry_switch(addr) != None and self.device.search_entry_device(addr) == True), f"Entry for {hex(addr)} found on switch and device"
         
         if self.reqid % 1000000 == 0:
             self.verify_system_state()
