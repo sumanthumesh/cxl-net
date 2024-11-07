@@ -7,7 +7,7 @@ from cache import cachesim
 from typing import List, Dict, Set, Tuple
 import json
 
-# cachesim.DEBUG = True
+cachesim.DEBUG = True
 cachesim.ADDR_WIDTH = 64
 
 class CXLNet:
@@ -533,7 +533,7 @@ class CoherenceEngine:
                     costs[switchid] = cost
                 #Find the switch that requires the minimum cost
                 selected_switch: CXLSwitch = min(costs,key=costs.get)
-                debug_print(f"Migrating {hex(addr)} from {dir_loc} to {selected_switch}")
+                debug_print(f"Lazy migrating {hex(addr)} from {dir_loc} to {selected_switch}")
                 #Now allocate entry on this switch
                 replacement_addr = self.switches[selected_switch].allocate(addr,dentry)
                 #Handle the replacement                    
@@ -549,6 +549,51 @@ class CoherenceEngine:
                 return selected_switch
             else:
                 return None 
+        elif self.migration_policy_name == 'perfect':
+            #This policy assumes we can migrate for every single transaction
+            #We dont need to have a single owner/sharer. If there are multiple sharers, we will migrate it then itself
+            #We dont count the number of migration hops either
+            #Just do the migration and assume our entries are now in a new location
+            #Get the directory entry
+            print(f"Came here")
+            dentry:DirectoryEntry = self.device.find_directory_entry(addr)
+            dir_loc:int = self.device.find_directory_location(addr)
+            
+            #Need to find a switch to put the directory on
+            #Aliasing
+            i = self.net.intermediate
+            #We need a switch that on avg represents the closest path from switch to sharers
+            #avg_hops(switchid) = average(path:switchid->sharers)
+            
+            switch_sssp = Dict[int,int]
+            hosts_with_copies: List[int] = dentry.sharers if dentry.state == DirectoryState.S else [dentry.owner]
+            for switchid in self.net.intermediate_path:
+                dist = 0
+                for hostid in hosts_with_copies:
+                    dist += self.net.path_cost([hostid,switchid])
+                switch_sssp[switchid] = dist/len(hosts_with_copies)
+            #Find the switch with the least avg sssp
+            new_location_id = min(switch_sssp,key=switch_sssp.get)
+            print(f"Perfect migrating entry for {hex(addr)} from {dir_loc} to {new_location_id}")
+            new_location = self.device.resolve_object(new_location_id)
+            #If new location is same as previous location return None
+            if new_location_id == dir_loc:
+                return None
+            #Now allocate entry on this switch
+            replacement_addr = new_location.allocate(addr,dentry)
+            #Handle the replacement                    
+            if replacement_addr != None:
+                self.handle_directory_eviction(replacement_addr,new_location.get_line(replacement_addr),selected_switch)
+                #Now reattempt to allocate line
+                temp = new_location.allocate(addr,dentry)
+                assert temp == None, f"Directory allocation on {new_location_id} failed"
+            #Remove original entry on device
+            self.device.evict(addr)
+            #Migration count
+            self.migration_stats["Migration count"] += 1
+            return new_location_id
+        else:
+            return None
                 
     def verify_line(self,addr):
         '''
@@ -655,7 +700,7 @@ class CoherenceEngine:
         
         ########################
         #For debugging help
-        if self.reqid == 14092:
+        if self.reqid == 1:
             # cachesim.DEBUG = True
             pass
         ########################
@@ -687,8 +732,12 @@ class CoherenceEngine:
             debug_print(f"Line {hex(addr)} not found")
             
         if hit:
-            #Entry might be lazy migrated before being served, keep in mind
+            #Entry might be migrated before being served if using perfect migration, keep in mind
             #This migration will happen after the new request has been received
+            new_location = self.migration_policy(addr,requestor)
+            if new_location != None:
+                dir_holder = self.device.resolve_object(self.device.find_directory_location(addr))
+            #Otherwise lazy migration is implemented later on
             dentry: DirectoryEntry = dir_holder.get_line(addr)
             debug_print(f"Current state: {dentry}")         
             #Check state and process accordingly
