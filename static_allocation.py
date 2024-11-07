@@ -7,7 +7,7 @@ from cache import cachesim
 from typing import List, Dict, Set, Tuple
 import json
 
-cachesim.DEBUG = True
+# cachesim.DEBUG = True
 cachesim.ADDR_WIDTH = 64
 
 class CXLNet:
@@ -781,19 +781,9 @@ class CoherenceEngine:
                         pass
                     #Add requestor
                     else:
-                        #Allocate on the requesting host
-                        replacement_addr = self.hosts[requestor].allocate(addr)
-                        #If there is any replacement, handle it
-                        if replacement_addr != None:
-                            self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
-                            #Now reattempt to allocate line
-                            temp = self.hosts[requestor].allocate(addr)
-                            assert temp == None, f"Host allocation on {destination.id} failed"
-                        #Add requestor as sharer in directory
-                        dentry.sharers.append(requestor)
-                        #Write the updated entry
-                        dir_holder.set_line(addr,dentry)
                         #Calculate path
+                        old_owner = dentry.sharers[0]
+                        closest_sharer = self.net.closest_node(requestor,old_sharer_list)
                         #If we do migration, then the dir_holder will change
                         new_dest = self.migration_policy(addr,requestor)
                         if new_dest != None:
@@ -806,11 +796,22 @@ class CoherenceEngine:
                             #If no migration then
                             assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
                             #requestor -> i -> dir -> closest sharer -> i -> dir -> requestor
-                            closest_sharer = self.net.closest_node(requestor,old_sharer_list)
                             path = [requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,closest_sharer,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,8)
                         debug_print("Here check it out 8")
+                        #Allocate on the requesting host
+                        replacement_addr = self.hosts[requestor].allocate(addr)
+                        #If there is any replacement, handle it
+                        if replacement_addr != None:
+                            self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
+                            #Now reattempt to allocate line
+                            temp = self.hosts[requestor].allocate(addr)
+                            assert temp == None, f"Host allocation on {destination.id} failed"
+                        #Add requestor as sharer in directory
+                        dentry.sharers.append(requestor)
+                        #Write the updated entry
+                        dir_holder.set_line(addr,dentry)
                 #If operation is write
                 else:
                     #Requestor already has line and is only sharer
@@ -1059,6 +1060,9 @@ if __name__ == "__main__":
     # simulator.print_communicating_hosts()
     
     print(simulator.migration_stats)
+    
+    if simulator.migration_policy_name == 'lazy':
+        assert simulator.migration_stats["Migration count"] == simulator.migration_stats["One copy diff host"], f"Missed migration opportunity"
         
     
     
