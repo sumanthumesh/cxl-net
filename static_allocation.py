@@ -734,9 +734,10 @@ class CoherenceEngine:
         if hit:
             #Entry might be migrated before being served if using perfect migration, keep in mind
             #This migration will happen after the new request has been received
-            new_location = self.migration_policy(addr,requestor)
-            if new_location != None:
-                dir_holder = self.device.resolve_object(self.device.find_directory_location(addr))
+            if self.migration_policy_name == 'perfect':
+                new_location = self.migration_policy(addr,requestor)
+                if new_location != None:
+                    dir_holder = self.device.resolve_object(self.device.find_directory_location(addr))
             #Otherwise lazy migration is implemented later on
             dentry: DirectoryEntry = dir_holder.get_line(addr)
             debug_print(f"Current state: {dentry}")         
