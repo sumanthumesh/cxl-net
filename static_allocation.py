@@ -7,7 +7,7 @@ from cache import cachesim
 from typing import List, Dict, Set, Tuple
 import json
 
-# cachesim.DEBUG = True
+cachesim.DEBUG = True
 cachesim.ADDR_WIDTH = 64
 
 class CXLNet:
@@ -335,6 +335,13 @@ class CoherenceEngine:
         
         #Data about which host or host pairs are doing most of the communication
         self.communicating_hosts: Dict[Set[int],int] = dict()
+        
+        #Data about migration
+        self.migration_stats: Dict[str,int] = {
+            "Migration count": 0,
+            "Migration cost": 0,
+            "One copy diff host": 0
+        }
     
     def set_placement_policy(self,policy:str):
         self.placement_policy_name = policy
@@ -537,6 +544,8 @@ class CoherenceEngine:
                     assert temp == None, f"Directory allocation on {selected_switch.id} failed"
                 #Remove original entry on device
                 self.device.evict(addr)
+                #Migration count
+                self.migration_stats["Migration count"] += 1
                 return selected_switch
             else:
                 return None 
@@ -647,7 +656,7 @@ class CoherenceEngine:
         ########################
         #For debugging help
         if self.reqid == 14092:
-            cachesim.DEBUG = True
+            # cachesim.DEBUG = True
             pass
         ########################
 
@@ -687,6 +696,8 @@ class CoherenceEngine:
             #If line is in Modified state
             if dentry.state == DirectoryState.A:
                 old_owner = dentry.owner
+                if requestor != dentry.owner and dir_holder.id == self.device.id:
+                    self.migration_stats["One copy diff host"] += 1
                 #If requestor is also owner, pass
                 if requestor == dentry.owner:
                     #No cost, wont be a CXL access
@@ -694,22 +705,6 @@ class CoherenceEngine:
                 else:
                     #If its a read
                     if optype == OpType.READ:
-                        #Change owner to sharer
-                        dentry.sharers.append(dentry.owner)
-                        #Remove owner
-                        dentry.owner = None
-                        #Change state
-                        dentry.state = DirectoryState.S
-                        #Allocate on the requesting host
-                        replacement_addr = self.hosts[requestor].allocate(addr)
-                        #If there is any replacement, handle it
-                        if replacement_addr != None:
-                            self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
-                            #Now reattempt to allocate line
-                            temp = self.hosts[requestor].allocate(addr)
-                            assert temp == None, f"Host allocation on {requestor} failed"
-                        #Add requestor to list of sharers
-                        dentry.sharers.append(requestor)
                         #Calculate path
                         #If we do migration, then the dir_holder will change
                         new_dest = self.migration_policy(addr,requestor)
@@ -726,20 +721,24 @@ class CoherenceEngine:
                             path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,6)
-                        debug_print("Here check it out 6")
-                    else:
-                        #Allocate on requestor
+                        #Change owner to sharer
+                        dentry.sharers.append(dentry.owner)
+                        #Remove owner
+                        dentry.owner = None
+                        #Change state
+                        dentry.state = DirectoryState.S
+                        #Allocate on the requesting host
                         replacement_addr = self.hosts[requestor].allocate(addr)
                         #If there is any replacement, handle it
                         if replacement_addr != None:
                             self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
                             #Now reattempt to allocate line
                             temp = self.hosts[requestor].allocate(addr)
-                            assert temp == None, f"Host allocation on {destination.id} failed"
-                        #Remove line from the original owner
-                        self.hosts[dentry.owner].evict(addr)
-                        #Set requestor as new owner
-                        dentry.owner = requestor
+                            assert temp == None, f"Host allocation on {requestor} failed"
+                        #Add requestor to list of sharers
+                        dentry.sharers.append(requestor)
+                        debug_print("Here check it out 6")
+                    else:
                         #Calculate path
                         #If we do migration, then the dir_holder will change
                         new_dest = self.migration_policy(addr,requestor)
@@ -757,10 +756,24 @@ class CoherenceEngine:
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,7)
                         debug_print("Here check it out 7")
+                        #Allocate on requestor
+                        replacement_addr = self.hosts[requestor].allocate(addr)
+                        #If there is any replacement, handle it
+                        if replacement_addr != None:
+                            self.handle_host_eviction(replacement_addr,self.device.find_directory_entry(replacement_addr),requestor)
+                            #Now reattempt to allocate line
+                            temp = self.hosts[requestor].allocate(addr)
+                            assert temp == None, f"Host allocation on {destination.id} failed"
+                        #Remove line from the original owner
+                        self.hosts[dentry.owner].evict(addr)
+                        #Set requestor as new owner
+                        dentry.owner = requestor
                     #Write the updated dentry
                     dir_holder.set_line(addr,dentry)
             elif dentry.state == DirectoryState.S:
                 old_sharer_list = dentry.sharers[:]
+                if len(dentry.sharers) == 1 and requestor not in dentry.sharers and dir_holder.id == self.device.id:
+                    self.migration_stats["One copy diff host"] += 1
                 #If operation is read
                 if optype == OpType.READ:
                     #If requestor is a sharer, dont do anything
@@ -985,37 +998,37 @@ if __name__ == "__main__":
     #          (0,8),(1,5),(2,6),(3,7),(4,11)]
     # N.G.add_edges_from(edges)
     
-    # N = CXLNet(num_hosts=cfg.num_hosts,num_devices=1,num_switches=cfg.num_switches)
-    # #Build the network topology
-    # edges = [
-    #     (17,18),(18,19),(19,20),(21,22),(22,23),(23,24),(25,26),(26,27),(27,28),(29,30),(30,31),(31,32),
-    #     (17,21),(18,22),(19,23),(20,24),(21,25),(22,26),(23,27),(24,28),(25,29),(26,30),(27,31),(28,32),
-    #     (0,17),(1,18),(2,19),(3,20),
-    #     (4,20),(5,24),(6,28),(7,32),
-    #     (8,32),(9,31),(10,30),(11,29),
-    #     (12,29),(13,25),(14,21),(15,17),
-    #     (16,31)
-    #     ]
-    # N.G.add_edges_from(edges)
-    
     N = CXLNet(num_hosts=cfg.num_hosts,num_devices=1,num_switches=cfg.num_switches)
     #Build the network topology
     edges = [
-        (17,25),(17,26),(18,25),(18,26),
-        (19,27),(19,28),(20,27),(20,28),
-        (21,29),(21,30),(22,29),(22,30),
-        (23,31),(23,32),(24,31),(24,32),
-        (25,33),(25,34),(26,35),(26,36),
-        (27,33),(27,34),(28,35),(28,36),
-        (29,33),(29,34),(30,35),(30,36),
-        (31,33),(31,34),(32,35),(32,36),
-        (0,17),(1,17),(2,18),(3,18),
-        (4,19),(5,19),(6,20),(7,20),
-        (8,21),(9,21),(10,22),(11,22),
-        (12,23),(13,23),(14,24),(15,24),
-        (16,22)
+        (17,18),(18,19),(19,20),(21,22),(22,23),(23,24),(25,26),(26,27),(27,28),(29,30),(30,31),(31,32),
+        (17,21),(18,22),(19,23),(20,24),(21,25),(22,26),(23,27),(24,28),(25,29),(26,30),(27,31),(28,32),
+        (0,17),(1,18),(2,19),(3,20),
+        (4,20),(5,24),(6,28),(7,32),
+        (8,32),(9,31),(10,30),(11,29),
+        (12,29),(13,25),(14,21),(15,17),
+        (16,31)
         ]
     N.G.add_edges_from(edges)
+    
+    # N = CXLNet(num_hosts=cfg.num_hosts,num_devices=1,num_switches=cfg.num_switches)
+    # #Build the network topology
+    # edges = [
+    #     (17,25),(17,26),(18,25),(18,26),
+    #     (19,27),(19,28),(20,27),(20,28),
+    #     (21,29),(21,30),(22,29),(22,30),
+    #     (23,31),(23,32),(24,31),(24,32),
+    #     (25,33),(25,34),(26,35),(26,36),
+    #     (27,33),(27,34),(28,35),(28,36),
+    #     (29,33),(29,34),(30,35),(30,36),
+    #     (31,33),(31,34),(32,35),(32,36),
+    #     (0,17),(1,17),(2,18),(3,18),
+    #     (4,19),(5,19),(6,20),(7,20),
+    #     (8,21),(9,21),(10,22),(11,22),
+    #     (12,23),(13,23),(14,24),(15,24),
+    #     (16,22)
+    #     ]
+    # N.G.add_edges_from(edges)
     
     N.draw()
     
@@ -1044,6 +1057,8 @@ if __name__ == "__main__":
     
     print(simulator.print_flow_records(cfg.output_json))
     # simulator.print_communicating_hosts()
+    
+    print(simulator.migration_stats)
         
     
     
