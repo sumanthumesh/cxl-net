@@ -549,7 +549,7 @@ class CoherenceEngine:
                 return selected_switch
             else:
                 return None 
-        elif self.migration_policy_name == 'perfect':
+        elif self.migration_policy_name == 'sssp':
             #This policy assumes we can migrate for every single transaction
             #We dont need to have a single owner/sharer. If there are multiple sharers, we will migrate it then itself
             #We dont count the number of migration hops either

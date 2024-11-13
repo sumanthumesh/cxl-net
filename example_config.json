@@ -14,5 +14,5 @@
     "Intermediate path" : [23,27,31,16],
     "Output json" : "results.json",
     "Placement policy" : "default",
-    "Migration policy" : "perfect"
+    "Migration policy" : "sssp"
 }
