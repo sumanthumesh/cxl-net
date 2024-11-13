@@ -14,5 +14,6 @@
     "Intermediate path" : [23,27,31,16],
     "Output json" : "results.json",
     "Placement policy" : "default",
-    "Migration policy" : "sssp"
+    "Migration policy" : "adaptive",
+    "Edgelist" : "topologies/mesh_4x4.edgelist"
 }

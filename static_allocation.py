@@ -28,7 +28,7 @@ class CXLNet:
         self.nodeids = self.host_ids + self.device_ids + self.switch_ids
         print(self.nodeids)
 
-        self.G = nx.Graph()
+        self.G: nx.Graph = nx.Graph()
         #Add nodes
         self.G.add_nodes_from(self.nodeids)
         
@@ -391,6 +391,26 @@ class CoherenceEngine:
         else:
             self.communicating_hosts[involved_hosts] += 1
 
+    def remove_intermediate(self,addr:int, path: List[int]):
+        #If the migration policy is fully adaptive, we dont have to worry about any intermediate switch
+        #So all paths between host and device will be the shortest paths and will not be host -> i -> device
+        #To implement this, we can take a path that involved the intermediate, and then translate it as follows
+        #1. If policy is not adaptive, return same path
+        #2. If the line is in invalid state, return same path
+        #3. If the intermediate node and the dir location are the same, return same path
+        #4. If the intermediate node is not same as dir location, remove the intermediate node from the path itself
+        
+        if self.migration_policy_name != 'adaptive':
+            return path
+        elif self.device.find_directory_location(addr) == None:
+            return path
+        elif self.device.find_directory_location(addr) == self.net.intermediate:
+            return path
+        else:
+            new_path = [node for node in path if node != self.net.intermediate]
+            debug_print(f"Removing intermediate from path {path} -> {new_path}")
+            return new_path
+
     def handle_host_eviction(self,addr:int,dentry:DirectoryEntry,evicting_host:int):
         '''
         When a host chooses to evict an entry, need to update device about it
@@ -412,7 +432,7 @@ class CoherenceEngine:
         if dentry.state == DirectoryState.A:
             #Calculate path
             #owner -> device -> owner
-            path = [dentry.owner,i,self.device.id,i,dentry.owner]
+            path = self.remove_intermediate(addr,[dentry.owner,i,self.device.id,i,dentry.owner])
             base_path = [dentry.owner,self.device.id,dentry.owner]
             self.static_path_benefit(path,base_path,1)
             debug_print("Here check it out 1")
@@ -435,13 +455,13 @@ class CoherenceEngine:
                 dir_holder.evict(addr)
                 #Path
                 #Evicting host -> device -> Evicting host
-                path = [evicting_host,i,self.device.id,i,evicting_host]
+                path = self.remove_intermediate(addr,[evicting_host,i,self.device.id,i,evicting_host])
                 base_path = [evicting_host,self.device.id,evicting_host]
                 self.static_path_benefit(path,base_path,2)
                 debug_print("Here check it out 2")
             else:
                 #Evicting host -> dir location -> evicting host
-                path = [evicting_host,i,dir_node_id,i,evicting_host]
+                path = self.remove_intermediate(addr,[evicting_host,i,dir_node_id,i,evicting_host])
                 base_path = [evicting_host,dir_node_id,evicting_host]
                 self.static_path_benefit(path,base_path,3)
                 debug_print("Here check it out 3")
@@ -463,7 +483,7 @@ class CoherenceEngine:
         if dentry.state == DirectoryState.A:
             #Calculate path
             #dir location -> owner -> device
-            path = [location,i,dentry.owner,i,self.device.id]
+            path = self.remove_intermediate(addr,[location,i,dentry.owner,i,self.device.id])
             base_path = [self.device.id,dentry.owner,self.device.id]
             self.static_path_benefit(path,base_path,4)
             debug_print("Here check it out 4")
@@ -473,7 +493,7 @@ class CoherenceEngine:
             #Calculate path
             #dir location -> furthest sharer -> device
             furthest_sharer = self.net.furthest_node(location,dentry.sharers)
-            path = [location,i,furthest_sharer,i,self.device.id]
+            path = self.remove_intermediate(addr,[location,i,furthest_sharer,i,self.device.id])
             base_path = [self.device.id,furthest_sharer,self.device.id]
             self.static_path_benefit(path,base_path,5)
             debug_print("Here check it out 5")
@@ -577,7 +597,46 @@ class CoherenceEngine:
             #If new location is same as previous location return None
             if new_location_id == dir_loc:
                 return None
-            print(f"Perfect migrating entry for {hex(addr)} from {dir_loc} to {new_location_id}")
+            print(f"SSSP migrating entry for {hex(addr)} from {dir_loc} to {new_location_id}")
+            #Now allocate entry on this switch
+            replacement_addr = new_location.allocate(addr,dentry)
+            #Handle the replacement                    
+            if replacement_addr != None:
+                self.handle_directory_eviction(replacement_addr,new_location.get_line(replacement_addr),new_location_id)
+                #Now reattempt to allocate line
+                temp = new_location.allocate(addr,dentry)
+                assert temp == None, f"Directory allocation on {new_location_id} failed"
+            #Remove original entry on device
+            self.device.resolve_object(dir_loc).evict(addr)
+            #Migration count
+            self.migration_stats["Migration count"] += 1
+            return new_location_id
+        elif self.migration_policy_name == 'adaptive':
+            #This policy assumes we can migrate for every single transaction
+            #Same as SSSP but we dont have any intermediate node, this is an implication for the routing policy
+            dentry:DirectoryEntry = self.device.find_directory_entry(addr)
+            dir_loc:int = self.device.find_directory_location(addr)
+            
+            #Need to find a switch to put the directory on
+            #Aliasing
+            i = self.net.intermediate
+            #We need a switch that on avg represents the closest path from switch to sharers
+            #avg_hops(switchid) = average(path:switchid->sharers)
+            
+            switch_sssp: Dict[int,int] = dict()
+            hosts_with_copies: List[int] = dentry.sharers if dentry.state == DirectoryState.S else [dentry.owner]
+            for switchid in self.net.switch_ids:
+                dist = 0
+                for hostid in hosts_with_copies:
+                    dist += self.net.path_cost([hostid,switchid])
+                switch_sssp[switchid] = dist/len(hosts_with_copies)
+            #Find the switch with the least avg sssp
+            new_location_id = min(switch_sssp,key=switch_sssp.get)
+            new_location = self.device.resolve_object(new_location_id)
+            #If new location is same as previous location return None
+            if new_location_id == dir_loc:
+                return None
+            print(f"Adaptive migrating entry for {hex(addr)} from {dir_loc} to {new_location_id}")
             #Now allocate entry on this switch
             replacement_addr = new_location.allocate(addr,dentry)
             #Handle the replacement                    
@@ -762,12 +821,12 @@ class CoherenceEngine:
                             dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
-                            path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
+                            path = self.remove_intermediate(addr,[requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor])
                         else:    
                             #If no migration then
                             assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
                             #requestor -> i -> dir -> owner -> i -> dir -> requestor
-                            path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
+                            path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor])
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,6)
                         #Change owner to sharer
@@ -796,12 +855,12 @@ class CoherenceEngine:
                             dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
-                            path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
+                            path = self.remove_intermediate(addr,[requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor])
                         else:    
                             #If no migration then
                             assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
                             #requestor -> i -> dir -> owner -> i -> dir -> requestor
-                            path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
+                            path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor])
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,7)
                         debug_print("Here check it out 7")
@@ -840,12 +899,12 @@ class CoherenceEngine:
                             dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
-                            path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
+                            path = self.remove_intermediate(addr,[requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor])
                         else:    
                             #If no migration then
                             assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
                             #requestor -> i -> dir -> closest sharer -> i -> dir -> requestor
-                            path = [requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor]
+                            path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor])
                         base_path = [requestor,self.device.id,closest_sharer,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,8)
                         debug_print("Here check it out 8")
@@ -868,7 +927,7 @@ class CoherenceEngine:
                         # Requestor only needs permission, not data
                         #Calculate path
                         #requestor -> dir -> requestor
-                        path = [requestor,i,dir_holder.id,i,requestor]
+                        path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,i,requestor])
                         base_path = [requestor,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,9)
                         debug_print("Here check it out 9")
@@ -883,12 +942,12 @@ class CoherenceEngine:
                             dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
-                            path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
+                            path = self.remove_intermediate(addr,[requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor])
                         else:    
                             #If no migration then
                             assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
                             #req -> dir -> furthest sharer -> dir -> req
-                            path = [requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor]
+                            path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor])
                         base_path = [requestor,self.device.id,farthest_sharer,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,10)
                         debug_print("Here check it out 10")
@@ -951,7 +1010,7 @@ class CoherenceEngine:
                 
             #Calculate path
             #requestor -> device -> requestor
-            path = [requestor,i,self.device.id,i,requestor]
+            path = self.remove_intermediate(addr,[requestor,i,self.device.id,i,requestor])
             base_path = [requestor,self.device.id,requestor]
             path_cost = self.static_path_benefit(path,base_path,11)
             debug_print("Here check it out 11")
@@ -1018,6 +1077,7 @@ class Config:
         self.output_json = d["Output json"]
         self.placement_policy = d["Placement policy"]
         self.migration_policy = d["Migration policy"]
+        self.edgelist = d["Edgelist"]
 
     def print(self):
         #Write the config onto console
@@ -1050,16 +1110,19 @@ if __name__ == "__main__":
     
     N = CXLNet(num_hosts=cfg.num_hosts,num_devices=1,num_switches=cfg.num_switches)
     #Build the network topology
-    edges = [
-        (17,18),(18,19),(19,20),(21,22),(22,23),(23,24),(25,26),(26,27),(27,28),(29,30),(30,31),(31,32),
-        (17,21),(18,22),(19,23),(20,24),(21,25),(22,26),(23,27),(24,28),(25,29),(26,30),(27,31),(28,32),
-        (0,17),(1,18),(2,19),(3,20),
-        (4,20),(5,24),(6,28),(7,32),
-        (8,32),(9,31),(10,30),(11,29),
-        (12,29),(13,25),(14,21),(15,17),
-        (16,31)
-        ]
-    N.G.add_edges_from(edges)
+    #Read from egdelist
+    N.G = nx.read_edgelist(cfg.edgelist,edgetype=int,nodetype=int)
+    
+    # edges = [
+    #     (17,18),(18,19),(19,20),(21,22),(22,23),(23,24),(25,26),(26,27),(27,28),(29,30),(30,31),(31,32),
+    #     (17,21),(18,22),(19,23),(20,24),(21,25),(22,26),(23,27),(24,28),(25,29),(26,30),(27,31),(28,32),
+    #     (0,17),(1,18),(2,19),(3,20),
+    #     (4,20),(5,24),(6,28),(7,32),
+    #     (8,32),(9,31),(10,30),(11,29),
+    #     (12,29),(13,25),(14,21),(15,17),
+    #     (16,31)
+    #     ]
+    # N.G.add_edges_from(edges)
     
     # N = CXLNet(num_hosts=cfg.num_hosts,num_devices=1,num_switches=cfg.num_switches)
     # #Build the network topology
