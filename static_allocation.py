@@ -372,13 +372,13 @@ class CoherenceEngine:
         in_network_cost = self.net.path_cost(in_network_path)
         base_cost = self.net.path_cost(base_path)
         if in_network_cost > base_cost:
-            debug_print(f"Deteriorated path {self.reqid}")
+            debug_print(f"Deteriorated path for req:{self.reqid}")
             self.flow_records[path_type]["Deteriorated"] += 1
         elif in_network_cost < base_cost:
-            debug_print(f"Improved path {self.reqid}")
+            debug_print(f"Improved path for req:{self.reqid}")
             self.flow_records[path_type]["Improved"] += 1
         else:
-            debug_print(f"Unchanged path {self.reqid}")
+            debug_print(f"Unchanged path for req:{self.reqid}")
             self.flow_records[path_type]["Same"] += 1
         
         #Record this path flow
@@ -435,7 +435,7 @@ class CoherenceEngine:
             path = self.remove_intermediate(addr,[dentry.owner,i,self.device.id,i,dentry.owner])
             base_path = [dentry.owner,self.device.id,dentry.owner]
             self.static_path_benefit(path,base_path,1)
-            debug_print("Here check it out 1")
+            debug_print("Path Type 1")
             self.hosts[dentry.owner].evict(addr)
             #Since there is no host with valid copy left, remove directory entry
             dir_holder.evict(addr)
@@ -458,13 +458,13 @@ class CoherenceEngine:
                 path = self.remove_intermediate(addr,[evicting_host,i,self.device.id,i,evicting_host])
                 base_path = [evicting_host,self.device.id,evicting_host]
                 self.static_path_benefit(path,base_path,2)
-                debug_print("Here check it out 2")
+                debug_print("Path Type 2")
             else:
                 #Evicting host -> dir location -> evicting host
                 path = self.remove_intermediate(addr,[evicting_host,i,dir_node_id,i,evicting_host])
                 base_path = [evicting_host,dir_node_id,evicting_host]
                 self.static_path_benefit(path,base_path,3)
-                debug_print("Here check it out 3")
+                debug_print("Path Type 3")
                 
             
     def handle_directory_eviction(self,addr:int,dentry:DirectoryEntry,location:int):
@@ -486,7 +486,7 @@ class CoherenceEngine:
             path = self.remove_intermediate(addr,[location,i,dentry.owner,i,self.device.id])
             base_path = [self.device.id,dentry.owner,self.device.id]
             self.static_path_benefit(path,base_path,4)
-            debug_print("Here check it out 4")
+            debug_print("Path Type 4")
             #Evict from owner
             self.hosts[dentry.owner].evict(addr)
         elif dentry.state == DirectoryState.S:
@@ -496,7 +496,7 @@ class CoherenceEngine:
             path = self.remove_intermediate(addr,[location,i,furthest_sharer,i,self.device.id])
             base_path = [self.device.id,furthest_sharer,self.device.id]
             self.static_path_benefit(path,base_path,5)
-            debug_print("Here check it out 5")
+            debug_print("Path Type 5")
             #Evict from all sharers
             for hostid in dentry.sharers:
                 self.hosts[hostid].evict(addr)
@@ -585,7 +585,7 @@ class CoherenceEngine:
             #avg_hops(switchid) = average(path:switchid->sharers)
             
             switch_sssp: Dict[int,int] = dict()
-            hosts_with_copies: List[int] = dentry.sharers if dentry.state == DirectoryState.S else [dentry.owner]
+            hosts_with_copies: List[int] = [requestor] + (dentry.sharers if dentry.state == DirectoryState.S else [dentry.owner])
             for switchid in self.net.intermediate_path:
                 dist = 0
                 for hostid in hosts_with_copies:
@@ -624,7 +624,7 @@ class CoherenceEngine:
             #avg_hops(switchid) = average(path:switchid->sharers)
             
             switch_sssp: Dict[int,int] = dict()
-            hosts_with_copies: List[int] = dentry.sharers if dentry.state == DirectoryState.S else [dentry.owner]
+            hosts_with_copies: List[int] = [requestor] + (dentry.sharers if dentry.state == DirectoryState.S else [dentry.owner])
             for switchid in self.net.switch_ids:
                 dist = 0
                 for hostid in hosts_with_copies:
@@ -716,15 +716,15 @@ class CoherenceEngine:
         total_benefit = 0
         #First print per path type records
         for path_type,stats in self.flow_records.items():
-            print(f"Type: {self.communication_flows[path_type]}")
+            # print(f"Type: {self.communication_flows[path_type]}")
             total_improved_count += stats["Improved"]
             total_same_count += stats["Same"]
             total_deteriorated_count += stats["Deteriorated"]
             total_benefit += stats["Benefit"]
-            for key,val in stats.items():
-                print(f"{key}:{val}")
-            if stats['Improved']+stats['Same']+stats['Deteriorated'] != 0:
-                print(f"AVG Benefit: {stats['Benefit']/(stats['Improved']+stats['Same']+stats['Deteriorated'])}")
+            # for key,val in stats.items():
+            #     print(f"{key}:{val}")
+            # if stats['Improved']+stats['Same']+stats['Deteriorated'] != 0:
+            #     print(f"AVG Benefit: {stats['Benefit']/(stats['Improved']+stats['Same']+stats['Deteriorated'])}")
             
         self.flow_records[-1] = {
             "Type" : "Overall",
@@ -845,7 +845,7 @@ class CoherenceEngine:
                             assert temp == None, f"Host allocation on {requestor} failed"
                         #Add requestor to list of sharers
                         dentry.sharers.append(requestor)
-                        debug_print("Here check it out 6")
+                        debug_print("Path Type 6")
                     else:
                         #Calculate path
                         #If we do migration, then the dir_holder will change
@@ -863,7 +863,7 @@ class CoherenceEngine:
                             path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor])
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,7)
-                        debug_print("Here check it out 7")
+                        debug_print("Path Type 7")
                         #Allocate on requestor
                         replacement_addr = self.hosts[requestor].allocate(addr)
                         #If there is any replacement, handle it
@@ -907,7 +907,7 @@ class CoherenceEngine:
                             path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor])
                         base_path = [requestor,self.device.id,closest_sharer,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,8)
-                        debug_print("Here check it out 8")
+                        debug_print("Path Type 8")
                         #Allocate on the requesting host
                         replacement_addr = self.hosts[requestor].allocate(addr)
                         #If there is any replacement, handle it
@@ -930,7 +930,7 @@ class CoherenceEngine:
                         path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,i,requestor])
                         base_path = [requestor,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,9)
-                        debug_print("Here check it out 9")
+                        debug_print("Path Type 9")
                     else:
                         old_owner = dentry.sharers[0]
                         #If we do migration, then the dir_holder will change
@@ -950,7 +950,7 @@ class CoherenceEngine:
                             path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor])
                         base_path = [requestor,self.device.id,farthest_sharer,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,10)
-                        debug_print("Here check it out 10")
+                        debug_print("Path Type 10")
                         
                         if requestor not in dentry.sharers:
                             # Requestor needs data, dir needs acknowledgements
@@ -1013,7 +1013,7 @@ class CoherenceEngine:
             path = self.remove_intermediate(addr,[requestor,i,self.device.id,i,requestor])
             base_path = [requestor,self.device.id,requestor]
             path_cost = self.static_path_benefit(path,base_path,11)
-            debug_print("Here check it out 11")
+            debug_print("Path Type 11")
             
         #Verification checks
         dentry = self.device.find_directory_entry(addr)
@@ -1078,6 +1078,7 @@ class Config:
         self.placement_policy = d["Placement policy"]
         self.migration_policy = d["Migration policy"]
         self.edgelist = d["Edgelist"]
+        self.debug = d["Debug"]
 
     def print(self):
         #Write the config onto console
@@ -1094,6 +1095,9 @@ if __name__ == "__main__":
     
     cfg = Config(config_file)
     cfg.print()
+    
+    #Specify debug
+    cachesim.DEBUG = cfg.debug
     
     hosts = [CXLHost(cfg.host_line_size,cfg.host_num_lines,cfg.host_assoc,i) for i in range(cfg.num_hosts)]
     device = CXLDevice(cfg.device_line_size,cfg.device_num_lines,cfg.device_assoc,cfg.num_hosts)
