@@ -1,10 +1,18 @@
 {
-    "Num hosts" : 4,
+    "Num hosts" : 16,
     "Host line size" : 64,
-    "Host num lines" : 16384,
+    "Host num lines" : 1024,
     "Host assoc" : 16,
     "Device line size" : 64,
-    "Device num lines" : 524288,
+    "Device num lines" : 4096,
     "Device assoc" : 16,
-    "Num switches" : 9
+    "Num switches" : 16,
+    "Switch line size" : 64,
+    "Switch num lines" : 4096,
+    "Switch assoc" : 16,
+    "Intermediate switch" : 23,
+    "Intermediate path" : [23,27,31,16],
+    "Output json" : "results.json",
+    "Placement policy" : "default",
+    "Migration policy" : "perfect"
 }
