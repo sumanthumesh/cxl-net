@@ -1,0 +1,5 @@
+scratchspace*
+*.log
+__pycache__
+.vscode
+.png
