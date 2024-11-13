@@ -7,7 +7,7 @@ from cache import cachesim
 from typing import List, Dict, Set, Tuple
 import json
 
-cachesim.DEBUG = True
+# cachesim.DEBUG = True
 cachesim.ADDR_WIDTH = 64
 
 class CXLNet:
@@ -555,7 +555,6 @@ class CoherenceEngine:
             #We dont count the number of migration hops either
             #Just do the migration and assume our entries are now in a new location
             #Get the directory entry
-            print(f"Came here")
             dentry:DirectoryEntry = self.device.find_directory_entry(addr)
             dir_loc:int = self.device.find_directory_location(addr)
             
@@ -565,7 +564,7 @@ class CoherenceEngine:
             #We need a switch that on avg represents the closest path from switch to sharers
             #avg_hops(switchid) = average(path:switchid->sharers)
             
-            switch_sssp = Dict[int,int]
+            switch_sssp: Dict[int,int] = dict()
             hosts_with_copies: List[int] = dentry.sharers if dentry.state == DirectoryState.S else [dentry.owner]
             for switchid in self.net.intermediate_path:
                 dist = 0
@@ -574,21 +573,21 @@ class CoherenceEngine:
                 switch_sssp[switchid] = dist/len(hosts_with_copies)
             #Find the switch with the least avg sssp
             new_location_id = min(switch_sssp,key=switch_sssp.get)
-            print(f"Perfect migrating entry for {hex(addr)} from {dir_loc} to {new_location_id}")
             new_location = self.device.resolve_object(new_location_id)
             #If new location is same as previous location return None
             if new_location_id == dir_loc:
                 return None
+            print(f"Perfect migrating entry for {hex(addr)} from {dir_loc} to {new_location_id}")
             #Now allocate entry on this switch
             replacement_addr = new_location.allocate(addr,dentry)
             #Handle the replacement                    
             if replacement_addr != None:
-                self.handle_directory_eviction(replacement_addr,new_location.get_line(replacement_addr),selected_switch)
+                self.handle_directory_eviction(replacement_addr,new_location.get_line(replacement_addr),new_location_id)
                 #Now reattempt to allocate line
                 temp = new_location.allocate(addr,dentry)
                 assert temp == None, f"Directory allocation on {new_location_id} failed"
             #Remove original entry on device
-            self.device.evict(addr)
+            self.device.resolve_object(dir_loc).evict(addr)
             #Migration count
             self.migration_stats["Migration count"] += 1
             return new_location_id
@@ -700,7 +699,7 @@ class CoherenceEngine:
         
         ########################
         #For debugging help
-        if self.reqid == 1:
+        if self.reqid == 15133:
             # cachesim.DEBUG = True
             pass
         ########################
@@ -732,6 +731,8 @@ class CoherenceEngine:
             debug_print(f"Line {hex(addr)} not found")
             
         if hit:
+            dentry: DirectoryEntry = dir_holder.get_line(addr)
+            debug_print(f"Current state: {dentry}")         
             #Entry might be migrated before being served if using perfect migration, keep in mind
             #This migration will happen after the new request has been received
             if self.migration_policy_name == 'perfect':
@@ -739,8 +740,6 @@ class CoherenceEngine:
                 if new_location != None:
                     dir_holder = self.device.resolve_object(self.device.find_directory_location(addr))
             #Otherwise lazy migration is implemented later on
-            dentry: DirectoryEntry = dir_holder.get_line(addr)
-            debug_print(f"Current state: {dentry}")         
             #Check state and process accordingly
             assert dentry.state != DirectoryState.I
             #If line is in Modified state
