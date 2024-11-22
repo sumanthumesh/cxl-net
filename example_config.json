@@ -16,5 +16,5 @@
     "Placement policy" : "default",
     "Migration policy" : "adaptive",
     "Edgelist" : "topologies/mesh_4x4.edgelist",
-    "Debug" : true
+    "Debug" : false
 }
