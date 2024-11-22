@@ -6,6 +6,7 @@ from cache.cachesim import DirectoryEntry, HostCache, SnoopFilter, BaseCache, de
 from cache import cachesim
 from typing import List, Dict, Set, Tuple
 import json
+import statistics
 
 # cachesim.DEBUG = True
 cachesim.ADDR_WIDTH = 64
@@ -116,7 +117,7 @@ class CXLNet:
             
     def closest_node(self,source:int,dest:List[int]):
         '''
-        Given one node and a list of nodes, find the node closest
+        Given a source node and and a list of candidate nodes, find the candidate closest to source
         '''
         return min(dest, key=lambda node: nx.shortest_path_length(self.G, source, node))
     
@@ -342,6 +343,10 @@ class CoherenceEngine:
             "Migration cost": 0,
             "One copy diff host": 0
         }
+        
+        self.migration_instances = []
+        
+        self.cxl_access_id = 0
     
     def set_placement_policy(self,policy:str):
         self.placement_policy_name = policy
@@ -432,7 +437,10 @@ class CoherenceEngine:
         if dentry.state == DirectoryState.A:
             #Calculate path
             #owner -> device -> owner
-            path = self.remove_intermediate(addr,[dentry.owner,i,self.device.id,i,dentry.owner])
+            if self.migration_policy_name == "adaptive":
+                path = [dentry.owner,self.device.id,dentry.owner]
+            else:
+                path = [dentry.owner,i,self.device.id,dentry.owner]
             base_path = [dentry.owner,self.device.id,dentry.owner]
             self.static_path_benefit(path,base_path,1)
             debug_print("Path Type 1")
@@ -452,16 +460,23 @@ class CoherenceEngine:
             self.hosts[evicting_host].evict(addr)
             #If it was a lone sharer, evict entry from directory
             if lone_sharer:
-                dir_holder.evict(addr)
                 #Path
                 #Evicting host -> device -> Evicting host
-                path = self.remove_intermediate(addr,[evicting_host,i,self.device.id,i,evicting_host])
+                if self.migration_policy_name == "adaptive":
+                    path = [evicting_host,dir_holder.id,self.device.id,evicting_host]
+                else:
+                    path = [evicting_host,i,self.device.id,evicting_host]
                 base_path = [evicting_host,self.device.id,evicting_host]
                 self.static_path_benefit(path,base_path,2)
                 debug_print("Path Type 2")
+                #Remove entry
+                dir_holder.evict(addr)
             else:
                 #Evicting host -> dir location -> evicting host
-                path = self.remove_intermediate(addr,[evicting_host,i,dir_node_id,i,evicting_host])
+                if self.migration_policy_name == "adaptive":
+                    path = [evicting_host,dir_node_id,evicting_host]
+                else:
+                    path = [evicting_host,i,dir_node_id,evicting_host]
                 base_path = [evicting_host,dir_node_id,evicting_host]
                 self.static_path_benefit(path,base_path,3)
                 debug_print("Path Type 3")
@@ -483,7 +498,10 @@ class CoherenceEngine:
         if dentry.state == DirectoryState.A:
             #Calculate path
             #dir location -> owner -> device
-            path = self.remove_intermediate(addr,[location,i,dentry.owner,i,self.device.id])
+            if self.migration_policy_name == "adaptive":
+                path = [location,dentry.owner,self.device.id,location]
+            else:
+                path = [location,dentry.owner,i,self.device.id,location]
             base_path = [self.device.id,dentry.owner,self.device.id]
             self.static_path_benefit(path,base_path,4)
             debug_print("Path Type 4")
@@ -493,7 +511,10 @@ class CoherenceEngine:
             #Calculate path
             #dir location -> furthest sharer -> device
             furthest_sharer = self.net.furthest_node(location,dentry.sharers)
-            path = self.remove_intermediate(addr,[location,i,furthest_sharer,i,self.device.id])
+            if self.migration_policy_name == "adaptive":
+                path = [location,furthest_sharer,self.device.id,location]
+            else:
+                path = [location,furthest_sharer,i,self.device.id,location]
             base_path = [self.device.id,furthest_sharer,self.device.id]
             self.static_path_benefit(path,base_path,5)
             debug_print("Path Type 5")
@@ -525,10 +546,17 @@ class CoherenceEngine:
             print("Unknown placement policy")
             exit(2)
     
-    def migration_policy(self,addr:int,requestor:int):
+    def migration_policy(self,addr:int,requestor:int,do_lazy=False):
         '''
         This function is called every transaction and performs migration of directory entry
         '''
+        
+        #If this invocation was only intended for lazy migration (indicated by do_lazy being set to true)
+        #and migration policy is not lazy, dont do migration
+        #This will only happen if policy is lazy
+        if self.migration_policy_name != "lazy" and do_lazy:
+            return None
+        
         if self.migration_policy_name == "lazy":
             #Get the directory entry
             dentry:DirectoryEntry = self.device.find_directory_entry(addr)
@@ -569,7 +597,7 @@ class CoherenceEngine:
                 return selected_switch
             else:
                 return None 
-        elif self.migration_policy_name == 'sssp':
+        elif self.migration_policy_name == 'sssp' and not do_only_if_lazy:
             #This policy assumes we can migrate for every single transaction
             #We dont need to have a single owner/sharer. If there are multiple sharers, we will migrate it then itself
             #We dont count the number of migration hops either
@@ -595,9 +623,11 @@ class CoherenceEngine:
             new_location_id = min(switch_sssp,key=switch_sssp.get)
             new_location = self.device.resolve_object(new_location_id)
             #If new location is same as previous location return None
-            if new_location_id == dir_loc:
+            #Or if the sssp to new location is same as current location, return none
+            if new_location_id == dir_loc or\
+                switch_sssp[new_location_id] == switch_sssp[dir_loc]:
                 return None
-            print(f"SSSP migrating entry for {hex(addr)} from {dir_loc} to {new_location_id}")
+            debug_print(f"SSSP migrating entry for {hex(addr)} from {dir_loc} to {new_location_id}")
             #Now allocate entry on this switch
             replacement_addr = new_location.allocate(addr,dentry)
             #Handle the replacement                    
@@ -625,7 +655,7 @@ class CoherenceEngine:
             
             switch_sssp: Dict[int,int] = dict()
             hosts_with_copies: List[int] = [requestor] + (dentry.sharers if dentry.state == DirectoryState.S else [dentry.owner])
-            for switchid in self.net.switch_ids:
+            for switchid in self.net.switch_ids+[self.device.id]:
                 dist = 0
                 for hostid in hosts_with_copies:
                     dist += self.net.path_cost([hostid,switchid])
@@ -634,9 +664,10 @@ class CoherenceEngine:
             new_location_id = min(switch_sssp,key=switch_sssp.get)
             new_location = self.device.resolve_object(new_location_id)
             #If new location is same as previous location return None
-            if new_location_id == dir_loc:
+            if new_location_id == dir_loc or\
+                switch_sssp[new_location_id] == switch_sssp[dir_loc]:
                 return None
-            print(f"Adaptive migrating entry for {hex(addr)} from {dir_loc} to {new_location_id}")
+            debug_print(f"Adaptive migrating entry for {hex(addr)} from {dir_loc} to {new_location_id}")
             #Now allocate entry on this switch
             replacement_addr = new_location.allocate(addr,dentry)
             #Handle the replacement                    
@@ -744,6 +775,22 @@ class CoherenceEngine:
         print(f"Total Deteriorated: {total_deteriorated_count}")
         print(f"Overall AVG benefit: {total_benefit/(total_improved_count+total_same_count+total_deteriorated_count)}")
     
+    def print_migration_interval(self):
+        
+        #Alias 
+        a = self.migration_instances
+        delta = [a[i+1]-a[i] for i in range(len(a)-1)]
+        
+        stats = {
+            "Min": min(delta),
+            "Max": max(delta),
+            "Avg": sum(delta)/len(delta),
+            "SD ": statistics.pstdev(delta)
+        }
+        
+        print(f"Migration interval")
+        print(stats)
+    
     def print_communicating_hosts(self):
         
         sorted_data = dict(sorted(self.communicating_hosts.items(),key=lambda item: item[1], reverse=True))
@@ -789,15 +836,24 @@ class CoherenceEngine:
         else:
             debug_print(f"Line {hex(addr)} not found")
             
+            
         if hit:
+            coherence_reqd = True
             dentry: DirectoryEntry = dir_holder.get_line(addr)
             debug_print(f"Current state: {dentry}")         
+            #Do we need any coherence action?
+            if (dentry.state == DirectoryState.A and dentry.owner == requestor) or \
+               (dentry.state == DirectoryState.S and requestor in dentry.sharers):
+                   coherence_reqd = False
+            else:
+                self.cxl_access_id += 1
             #Entry might be migrated before being served if using perfect migration, keep in mind
             #This migration will happen after the new request has been received
-            if self.migration_policy_name == 'perfect':
+            if (self.migration_policy_name == 'sssp' or self.migration_policy_name == 'adaptive') and coherence_reqd:
                 new_location = self.migration_policy(addr,requestor)
                 if new_location != None:
                     dir_holder = self.device.resolve_object(self.device.find_directory_location(addr))
+                    self.migration_instances.append(self.cxl_access_id)
             #Otherwise lazy migration is implemented later on
             #Check state and process accordingly
             assert dentry.state != DirectoryState.I
@@ -815,18 +871,24 @@ class CoherenceEngine:
                     if optype == OpType.READ:
                         #Calculate path
                         #If we do migration, then the dir_holder will change
-                        new_dest = self.migration_policy(addr,requestor)
+                        new_dest = self.migration_policy(addr,requestor,True)
                         if new_dest != None:
                             #Assign new dir holder
                             dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
-                            path = self.remove_intermediate(addr,[requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor])
+                            if self.migration_policy_name == "adaptive":
+                                path = [requestor,self.device.id,new_dest,old_owner,new_dest,requestor]
+                            else:
+                                path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
                         else:    
                             #If no migration then
                             assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
                             #requestor -> i -> dir -> owner -> i -> dir -> requestor
-                            path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor])
+                            if self.migration_policy_name == "adaptive":
+                                path = [requestor,dir_holder.id,old_owner,dir_holder.id,requestor]
+                            else:
+                                path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,6)
                         #Change owner to sharer
@@ -849,18 +911,24 @@ class CoherenceEngine:
                     else:
                         #Calculate path
                         #If we do migration, then the dir_holder will change
-                        new_dest = self.migration_policy(addr,requestor)
+                        new_dest = self.migration_policy(addr,requestor,True)
                         if new_dest != None:
                             #Assign new dir holder
                             dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
-                            path = self.remove_intermediate(addr,[requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor])
+                            if self.migration_policy_name == "adaptive":
+                                path = [requestor,self.device.id,new_dest,old_owner,new_dest,requestor]
+                            else:
+                                path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
                         else:    
                             #If no migration then
                             assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
                             #requestor -> i -> dir -> owner -> i -> dir -> requestor
-                            path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor])
+                            if self.migration_policy_name == "adaptive":
+                                path = [requestor,dir_holder.id,old_owner,dir_holder.id,requestor]
+                            else:
+                                path = [requestor,i,dir_holder.id,old_owner,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,old_owner,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,7)
                         debug_print("Path Type 7")
@@ -891,20 +959,27 @@ class CoherenceEngine:
                     else:
                         #Calculate path
                         old_owner = dentry.sharers[0]
-                        closest_sharer = self.net.closest_node(requestor,old_sharer_list)
                         #If we do migration, then the dir_holder will change
-                        new_dest = self.migration_policy(addr,requestor)
+                        new_dest = self.migration_policy(addr,requestor,True)
                         if new_dest != None:
                             #Assign new dir holder
+                            closest_sharer = self.net.closest_node(new_dest,old_sharer_list)
                             dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
-                            path = self.remove_intermediate(addr,[requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor])
+                            if self.migration_policy_name == "adaptive":
+                                path = [requestor,self.device.id,new_dest,old_owner,new_dest,requestor]
+                            else:
+                                path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
                         else:    
                             #If no migration then
                             assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
+                            closest_sharer = self.net.closest_node(dir_holder.id,old_sharer_list)
                             #requestor -> i -> dir -> closest sharer -> i -> dir -> requestor
-                            path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor])
+                            if self.migration_policy_name == "adaptive":
+                                path = [requestor,dir_holder.id,closest_sharer,dir_holder.id,requestor]
+                            else:
+                                path = [requestor,i,dir_holder.id,closest_sharer,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,closest_sharer,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,8)
                         debug_print("Path Type 8")
@@ -927,27 +1002,51 @@ class CoherenceEngine:
                         # Requestor only needs permission, not data
                         #Calculate path
                         #requestor -> dir -> requestor
-                        path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,i,requestor])
+                        if self.migration_policy_name == "adaptive":
+                            path = [requestor,dir_holder.id,requestor]
+                        else:
+                            path = [requestor,i,dir_holder.id,i,requestor]
                         base_path = [requestor,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,9)
                         debug_print("Path Type 9")
                     else:
                         old_owner = dentry.sharers[0]
                         #If we do migration, then the dir_holder will change
-                        new_dest = self.migration_policy(addr,requestor)
+                        new_dest = self.migration_policy(addr,requestor,True)
                         #Reser dir holder
-                        farthest_sharer = self.net.furthest_node(requestor,old_sharer_list)
                         if new_dest != None:
+                            #Remove requestor from sharer list while computing furthest node
+                            if requestor in old_sharer_list:
+                                new_sharer_list = old_sharer_list[:]
+                                new_sharer_list.remove(requestor)
+                            else:
+                                new_sharer_list = old_sharer_list[:]
+                            print(f"OLD: {old_sharer_list}")
+                            print(f"NEW: {new_sharer_list}")
+                            farthest_sharer = self.net.furthest_node(new_dest,new_sharer_list)
                             #Assign new dir holder
                             dir_holder = self.device.resolve_object(new_dest)
                             assert self.device.find_directory_location(addr) == new_dest, f"Migration of {hex(addr)} from {dir_holder} to {new_dest} unsuccessful"
                             #requestor -> i -> device -> new dir -> owner -> i -> new dir -> requestor
-                            path = self.remove_intermediate(addr,[requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor])
+                            if self.migration_policy_name == "adaptive":
+                                path = [requestor,self.device.id,new_dest,old_owner,new_dest,requestor]
+                            else:
+                                path = [requestor,i,self.device.id,new_dest,old_owner,i,new_dest,requestor]
                         else:    
                             #If no migration then
                             assert self.device.find_directory_location(addr) == dir_holder.id, f"Entry for {hex(addr)} not found in {dir_holder}"
+                            #Remove requestor from sharer list while computing furthest node
+                            if requestor in old_sharer_list:
+                                new_sharer_list = old_sharer_list[:]
+                                new_sharer_list.remove(requestor)
+                            else:
+                                new_sharer_list = old_sharer_list[:]
+                            farthest_sharer = self.net.furthest_node(dir_holder.id,new_sharer_list)
                             #req -> dir -> furthest sharer -> dir -> req
-                            path = self.remove_intermediate(addr,[requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor])
+                            if self.migration_policy_name == "adaptive":
+                                path = [requestor,dir_holder.id,farthest_sharer,dir_holder.id,requestor]
+                            else:
+                                path = [requestor,i,dir_holder.id,farthest_sharer,i,dir_holder.id,requestor]
                         base_path = [requestor,self.device.id,farthest_sharer,self.device.id,requestor]
                         path_cost = self.static_path_benefit(path,base_path,10)
                         debug_print("Path Type 10")
@@ -1010,7 +1109,10 @@ class CoherenceEngine:
                 
             #Calculate path
             #requestor -> device -> requestor
-            path = self.remove_intermediate(addr,[requestor,i,self.device.id,i,requestor])
+            if self.migration_policy_name == "adaptive":
+                path = [requestor,self.device.id,requestor]
+            else:
+                path = [requestor,i,self.device.id,i,requestor]
             base_path = [requestor,self.device.id,requestor]
             path_cost = self.static_path_benefit(path,base_path,11)
             debug_print("Path Type 11")
@@ -1176,7 +1278,7 @@ if __name__ == "__main__":
     # simulator.print_communicating_hosts()
     
     print(simulator.migration_stats)
-    
+    simulator.print_migration_interval()
     if simulator.migration_policy_name == 'lazy':
         assert simulator.migration_stats["Migration count"] == simulator.migration_stats["One copy diff host"], f"Missed migration opportunity"
         
