@@ -347,6 +347,14 @@ class CoherenceEngine:
         self.migration_instances = []
         
         self.cxl_access_id = 0
+        
+        self.sharer_set_record:Dict[int,List[Set[int]]] = dict()
+    
+    def print_sharer_set(self,output_filename):
+        
+        with open(output_filename,'w') as file:
+            for addr,sets in self.sharer_set_record.items():
+                file.write(f"{hex(addr)}:{sets}\n")
     
     def set_placement_policy(self,policy:str):
         self.placement_policy_name = policy
@@ -814,6 +822,9 @@ class CoherenceEngine:
         # if addr == 0x5642ccc750e0:
         #     print(f"{self.reqid}: {hex(addr)} {optype} {requestor}")
 
+        #Flag that is true if this is a CXL access. Otherwise it will be false
+        cxl_access = False
+
         if self.reqid % 10000 == 0:
             print(self.reqid)
         hit = False
@@ -847,6 +858,7 @@ class CoherenceEngine:
                    coherence_reqd = False
             else:
                 self.cxl_access_id += 1
+                cxl_access = True
             #Entry might be migrated before being served if using perfect migration, keep in mind
             #This migration will happen after the new request has been received
             if (self.migration_policy_name == 'sssp' or self.migration_policy_name == 'adaptive') and coherence_reqd:
@@ -1076,6 +1088,8 @@ class CoherenceEngine:
                     dentry.state = DirectoryState.A
                     dir_holder.set_line(addr,dentry)
         else:
+            self.cxl_access_id += 1
+            cxl_access = True
             #We dont have the directory entry
             #Need to allocate it
             #Find the destination to allocate
@@ -1117,8 +1131,23 @@ class CoherenceEngine:
             path_cost = self.static_path_benefit(path,base_path,11)
             debug_print("Path Type 11")
             
-        #Verification checks
+            
+            
         dentry = self.device.find_directory_entry(addr)
+        
+        #Record the sharer set
+        #Cache line addr
+        if cxl_access:
+            line_addr = addr & 0xffff_ffff_ffff_ff00
+            #Create the tuple to add
+            sharer_set = set(dentry.sharers if dentry.state==DirectoryState.S else [dentry.owner])
+            t = (sharer_set,requestor,"R" if optype==OpType.READ else "W")
+            if line_addr not in self.sharer_set_record.keys():
+                self.sharer_set_record[line_addr] = [sharer_set]
+            else:
+                self.sharer_set_record[line_addr].append(sharer_set)
+        
+        #Verification checks
         #Lots of em
         #Check state
         assert not (dentry.owner != None and len(dentry.sharers) > 0), f"Line has owner {dentry.owner} and sharers {dentry.sharers} at the same time"
@@ -1181,6 +1210,7 @@ class Config:
         self.migration_policy = d["Migration policy"]
         self.edgelist = d["Edgelist"]
         self.debug = d["Debug"]
+        self.sharer_file = d["Sharer data"]
 
     def print(self):
         #Write the config onto console
@@ -1278,10 +1308,11 @@ if __name__ == "__main__":
     # simulator.print_communicating_hosts()
     
     print(simulator.migration_stats)
-    simulator.print_migration_interval()
+    if simulator.migration_policy_name != 'none':
+        simulator.print_migration_interval()
     if simulator.migration_policy_name == 'lazy':
         assert simulator.migration_stats["Migration count"] == simulator.migration_stats["One copy diff host"], f"Missed migration opportunity"
         
-    
+    simulator.print_sharer_set(cfg.sharer_file)
     
     
